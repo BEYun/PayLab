@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: xcode-27  # GitHub 미리보기 이미지 (macOS 27)
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer  # 로컬과 같은 Xcode (러너 기본값은 27.1)
+      TUIST_VERSION: 4.216.0
+      TUIST_SHA256: eef9b9b0c5722052cc54ec6e114bd557cfcf8f695e483fb39cb80d53959354fc  # 릴리스의 SHASUMS256.txt
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tuist 설치
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/tuist.zip" "https://github.com/tuist/tuist/releases/download/$TUIST_VERSION/tuist.zip"
+          echo "$TUIST_SHA256  $RUNNER_TEMP/tuist.zip" | shasum -a 256 -c -
+          ditto -x -k "$RUNNER_TEMP/tuist.zip" "$RUNNER_TEMP/tuist"  # 프레임워크 심볼릭 링크 보존
+          echo "$RUNNER_TEMP/tuist" >> "$GITHUB_PATH"
+
+      - name: 프로젝트 생성
+        run: tuist generate --no-open
+
+      - name: 시뮬레이터 부팅
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '.devices["com.apple.CoreSimulator.SimRuntime.iOS-27-0"][] | select(.name == "iPhone 18 Pro") | .udid')
+          xcrun simctl bootstatus "$UDID" -b  # 꺼진 시뮬레이터에서 첫 테스트가 실패하는 것 방지
+          echo "DESTINATION=id=$UDID" >> "$GITHUB_ENV"
+
+      - name: 빌드
+        run: xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "$DESTINATION" -derivedDataPath .build/DerivedData build-for-testing
+
+      - name: 테스트
+        run: xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "$DESTINATION" -derivedDataPath .build/DerivedData test-without-building

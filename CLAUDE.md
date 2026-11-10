@@ -45,3 +45,17 @@ xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-curr
 ## 금지
 - `*.xcodeproj`, `*.xcworkspace`, `Derived/`, `.build/` 커밋 금지
 - 외부 라이브러리 추가는 해당 주제 세션에서 사용자 확인 후
+
+## CI (GitHub Actions)
+- 원격: https://github.com/BEYun/PayLab (공개). 설정: `.github/workflows/ci.yml`.
+- 실행 시점: `main` push, PR 열기·갱신.
+- 환경: GitHub 러너 `xcode-27`(미리보기), Xcode 27.2, `iPhone 18 Pro` / iOS 27.0. `PayLab-<브랜치>` 시뮬레이터는 로컬 전용.
+- 단계: Tuist 설치(버전·체크섬 고정) → `tuist generate` → 시뮬레이터 부팅 → `build-for-testing` → `test-without-building`.
+- Tuist 버전 변경: 워크플로의 `TUIST_VERSION`과 `TUIST_SHA256`(릴리스의 `SHASUMS256.txt`)을 함께 바꾸고 로컬 Tuist도 맞춘다.
+- 공개 저장소다. 커밋 작성자는 GitHub noreply 메일(저장소 git 설정). 커밋 전에 키·토큰·개인 경로가 없는지 확인한다.
+
+```bash
+gh pr checks                       # 현재 브랜치 PR의 CI 결과
+gh run list --limit 5              # 최근 실행
+gh run view <run-id> --log-failed  # 실패한 단계 로그만
+```
