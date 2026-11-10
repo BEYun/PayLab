@@ -59,7 +59,7 @@
   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
   ```
   실행 전까지는 명령마다 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`로 우회할 수 있다.
-- 프로젝트 경로: `/Users/yun/Desktop/Projects/Toss` (현재 빈 폴더, git 저장소 아님)
+- 프로젝트 경로: 사용자 로컬 폴더 (현재 빈 폴더, git 저장소 아님)
 
 ### 작업 규칙 (사용자 전역 CLAUDE.md)
 
