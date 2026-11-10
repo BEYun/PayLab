@@ -42,6 +42,76 @@ xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-curr
 
 테스트는 Swift Testing(`import Testing`)이다. xcodebuild는 XCTest 번들마다 "Executed 0 tests"를 찍으므로, 실제 개수는 Swift Testing 줄에서 읽는다. 현재 6개.
 
+## 디버깅
+버그 원인은 Claude가 명령줄로 찾는다. 로그 → 도구 → 코드 순서. 설계: docs/superpowers/specs/2026-11-10-debugging-design.md
+
+### 로그 체계
+`os.Logger`, subsystem `com.example.paylab`. 보간 값은 모두 `.public`이라 가려지지 않는다.
+
+| 카테고리 | 남기는 줄 |
+|---|---|
+| `app` | `launch failTransfers=<bool>` |
+| `network` | `request <메서드> /<경로>` · `response <상태> <메서드> /<경로> <ms>ms <바이트>B` · `body <메서드> /<경로> <원문>`(DEBUG 빌드만) · `decode failed <타입> <메서드> /<경로>: typeMismatch(Int) at [0].balance: <설명>` + 원문 `body` · `transport failed …` |
+| `home` | `load start` · `load ok accounts=<n>` · `load failed keep=<n>: <오류>` |
+| `transfer` | `recipients start/ok count=<n>/failed` · `select recipient=<id>` · `confirm amount=<n>` / `confirm blocked amountText=… amount=… balance=…` · `submit start/ok/failed` / `submit ignored recipient=… amount=…` |
+
+- 레벨: debug = 요청·원문·시작, info = 성공, error = 실패·`blocked`·`ignored`·비 2xx 응답.
+- `body` 원문 길이가 `response` 줄의 바이트 수보다 짧으면 로그에서 잘린 것이다.
+- 로그가 없는 곳: 뷰(SwiftUI `body`), `FakeServer` 내부. 이쪽 문제는 "모델 로그 정상 + 화면 이상"으로 드러난다.
+
+### 준비 (같은 셸에서)
+```bash
+SIM="PayLab-$(git branch --show-current)"
+xcrun simctl bootstatus "$SIM" -b   # 부팅 완료까지 대기. 부팅 직후 launch는 "No such process"로 실패할 수 있다
+xcrun simctl spawn "$SIM" log config --subsystem com.example.paylab --mode "level:debug,persist:debug"   # 시뮬레이터마다 1회. 안 하면 log show에서 debug 줄이 빠진다
+PID=$(xcrun simctl spawn "$SIM" launchctl list | awk '/com.example.paylab/ {print $1}')   # 이 시뮬레이터의 PayLab PID. pgrep은 다른 세션 시뮬레이터의 PayLab까지 잡는다
+```
+
+### 로그 읽기와 재현
+```bash
+xcrun simctl spawn "$SIM" log stream --level debug --style compact --predicate 'subsystem == "com.example.paylab"' > <scratchpad>/app.log   # 백그라운드로 띄우고 재현한 뒤 파일을 읽는다
+xcrun simctl spawn "$SIM" log show --last 5m --info --debug --style compact --predicate 'subsystem == "com.example.paylab"'          # 이미 지나간 일 조회
+xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                                                                              # 화면 확인
+```
+- 화면 조작은 iOS 시뮬레이터 도구(`mcp__Claude_Code_iOS_Simulator__control`)의 `tap`·`screenshot`. 좌표는 포인트(402×874).
+- 금액 입력: `text` 동작은 붙여넣기라 막힌다. 금액 칸을 탭해 숫자 키패드를 띄운 뒤 키를 하나씩 탭한다.
+- 스크린샷은 탭보다 늦게 갱신될 수 있다. 화면이 안 바뀐 것 같으면 한 번 더 찍거나, 로그(`select`, `confirm` 등)로 탭이 들어갔는지 본다.
+
+### 유형별 절차
+**디코딩 불일치** (목록이 비었다, 화면이 안 넘어간다)
+- `grep "decode failed"` → 타입·필드 경로·이유. 바로 뒤 `body` 줄 원문을 `Modules/Domain/Sources/Models.swift`와 비교한다.
+
+**무반응·렌더링 실패** — 해당 동작의 마지막 로그로 구분한다.
+
+| 로그 | 뜻 | 다음에 볼 곳 |
+|---|---|---|
+| 해당 동작의 로그가 아예 없음 | 모델 메서드가 불리지 않음 | 그 화면 뷰의 버튼·탭 연결 (`Modules/*/Sources/*View.swift`) |
+| `confirm blocked` / `submit ignored` | guard에 막힘 | 로그에 찍힌 값과 조건 (`TransferRule`, `canProceed`) |
+| `request`만 있고 `response`가 없음 | 응답이 오지 않음 | 가짜 서버 지연·`FakeServerURLProtocol` |
+| 비 2xx `response` / `decode failed` / `… failed` | 실패가 화면에서 삼켜짐 | 그 오류 |
+| `… ok`인데 스크린샷에 없음 | 모델은 정상, 뷰가 못 그림 | 그 화면 뷰 코드 |
+
+**멈춤** (화면이 굳었다)
+- 멈춘 상태에서 `sample $PID 3 -file <scratchpad>/sample.txt` → `grep "PayLab.debug.dylib" <scratchpad>/sample.txt`로 앱 코드 프레임을 찾는다.
+- `com.apple.main-thread` 스레드가 앱 프레임에서 오래 머물면 그 함수가 원인이다. 정상 대기는 `mach_msg2_trap` / `__CFRunLoopServiceMachPort`다.
+
+**메모리 누수** (반복할수록 메모리가 는다)
+- `SIMCTL_CHILD_MallocStackLogging=1 xcrun simctl launch --terminate-running-process "$SIM" com.example.paylab`로 실행하고 PID를 다시 구한다.
+- `heap $PID | grep PayLab.debug.dylib` → 앱 타입별 인스턴스 수. 의심 동작(예: 송금 창 열고 닫기)을 N번 반복한 전후로 비교한다. 계속 느는 타입이 후보다.
+- `leaks $PID | sed -n '/leaks Report/,/Binary Images/p'` → 누수 객체, 순환 참조, 할당 스택.
+- 앱 시작 직후부터 있는 `ROOT LEAK: <non-object …> [32]` 1개(NO STACK)는 잡음이다.
+
+**메인 스레드 위반·크래시** (앱이 꺼졌다)
+- `python3 -I scripts/crash-summary.py` → 가장 최근 `~/Library/Logs/DiagnosticReports/PayLab-*.ips`의 예외, 종료 이유, 앱 메시지(Swift fatal error 등), 크래시 스레드 프레임.
+- 재현할 때 Main Thread Checker를 켜면, 메인 스레드 전용 API를 다른 스레드에서 부를 때 바로 크래시하고 리포트가 남는다:
+  `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib SIMCTL_CHILD_MTC_CRASH_ON_REPORT=1 xcrun simctl launch --terminate-running-process "$SIM" com.example.paylab`
+- 데이터 경쟁은 Thread Sanitizer 빌드로 본다. 보고는 stderr로 나오므로 `--console-pty`로 실행해 파일로 받는다. 끝나면 일반 빌드를 다시 설치한다.
+  ```bash
+  xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=$SIM" -derivedDataPath .build/DerivedData-tsan -enableThreadSanitizer YES build
+  xcrun simctl install "$SIM" .build/DerivedData-tsan/Build/Products/Debug-iphonesimulator/PayLab.app
+  xcrun simctl launch --console-pty --terminate-running-process "$SIM" com.example.paylab > <scratchpad>/tsan.txt 2>&1   # 백그라운드로
+  ```
+
 ## 금지
 - `*.xcodeproj`, `*.xcworkspace`, `Derived/`, `.build/` 커밋 금지
 - 외부 라이브러리 추가는 해당 주제 세션에서 사용자 확인 후
