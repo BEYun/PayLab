@@ -1,5 +1,8 @@
 import Domain
 import Observation
+import os
+
+private let log = Logger(subsystem: "com.example.paylab", category: "transfer")
 
 @MainActor @Observable
 public final class TransferModel {
@@ -33,28 +36,44 @@ public final class TransferModel {
 
     /// 실패 시 빈 목록 유지.
     public func loadRecipients() async {
-        if let fetched = try? await repository.fetchRecipients() {
-            recipients = fetched
+        log.debug("recipients start")
+        do {
+            recipients = try await repository.fetchRecipients()
+            log.info("recipients ok count=\(self.recipients.count, privacy: .public)")
+        } catch {
+            log.error("recipients failed: \(String(describing: error), privacy: .public)")
         }
     }
 
     public func select(_ recipient: Recipient) {
+        log.info("select recipient=\(recipient.id, privacy: .public)")
         selectedRecipient = recipient
         path = [.amount]
     }
 
     public func proceedToConfirm() {
-        guard canProceed else { return }
+        guard canProceed else {
+            log.error("confirm blocked amountText=\"\(self.amountText, privacy: .public)\" amount=\(self.amount.map(String.init) ?? "nil", privacy: .public) balance=\(self.fromAccount.balance, privacy: .public)")
+            return
+        }
+        log.info("confirm amount=\(self.amount ?? 0, privacy: .public)")
         path.append(.confirm)
     }
 
     /// 성공 → .success, 어떤 오류든 → .failure. 그다음 .result로 이동.
     public func submit() async {
-        guard let recipient = selectedRecipient, let amount else { return }
+        guard let recipient = selectedRecipient, let amount else {
+            log.error("submit ignored recipient=\(self.selectedRecipient?.id ?? "nil", privacy: .public) amount=\(self.amount.map(String.init) ?? "nil", privacy: .public)")
+            return
+        }
         let request = TransferRequest(fromAccountID: fromAccount.id, recipientID: recipient.id, amount: amount)
+        log.info("submit start from=\(request.fromAccountID, privacy: .public) to=\(request.recipientID, privacy: .public) amount=\(amount, privacy: .public)")
         do {
-            outcome = .success(try await repository.transfer(request))
+            let receipt = try await repository.transfer(request)
+            log.info("submit ok transferID=\(receipt.transferID, privacy: .public) balanceAfter=\(receipt.balanceAfter, privacy: .public)")
+            outcome = .success(receipt)
         } catch {
+            log.error("submit failed: \(String(describing: error), privacy: .public)")
             outcome = .failure
         }
         path.append(.result)

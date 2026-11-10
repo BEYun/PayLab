@@ -1,5 +1,8 @@
 import Domain
 import Observation
+import os
+
+private let log = Logger(subsystem: "com.example.paylab", category: "home")
 
 @MainActor @Observable
 public final class HomeModel {
@@ -16,8 +19,12 @@ public final class HomeModel {
     public func load() async {
         isLoading = true
         defer { isLoading = false }
-        if let fetched = try? await repository.fetchAccounts() {
-            accounts = fetched
+        log.debug("load start")
+        do {
+            accounts = try await repository.fetchAccounts()
+            log.info("load ok accounts=\(self.accounts.count, privacy: .public)")
+        } catch {
+            log.error("load failed keep=\(self.accounts.count, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 }
