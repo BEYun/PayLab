@@ -86,7 +86,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           JOB_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs[] | select(.name == "build-and-test") | .id')
-          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID/logs" > ci-failure.log
+          gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID/logs" > ci-failure.log  # xcodebuild 색상 코드 때문에 필요
 
       - name: Claude 실패 분석
         uses: anthropics/claude-code-action@v1
