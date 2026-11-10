@@ -51,6 +51,8 @@ xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-curr
 - 실행 시점: `main` push, PR 열기·갱신.
 - 환경: GitHub 러너 `xcode-27`(미리보기), Xcode 27.2, `iPhone 18 Pro` / iOS 27.0. `PayLab-<브랜치>` 시뮬레이터는 로컬 전용.
 - 단계: Tuist 설치(버전·체크섬 고정) → `tuist generate` → 시뮬레이터 부팅 → `build-for-testing` → `test-without-building`.
+- Claude(`anthropics/claude-code-action@v1`): PR을 열거나 다시 열면 `claude-review` 잡이 리뷰 코멘트, PR 빌드·테스트가 실패하면 `claude-ci-failure` 잡이 원인 코멘트. 소유자 PR만 실행. 코드는 고치지 않는다.
+- Claude 인증: 저장소 Secret `CLAUDE_CODE_OAUTH_TOKEN`(`claude setup-token`으로 발급, 사용자가 직접 등록). 코멘트는 `github-actions[bot]` 이름.
 - Tuist 버전 변경: 워크플로의 `TUIST_VERSION`과 `TUIST_SHA256`(릴리스의 `SHASUMS256.txt`)을 함께 바꾸고 로컬 Tuist도 맞춘다.
 - 공개 저장소다. 커밋 작성자는 GitHub noreply 메일(저장소 git 설정). 커밋 전에 키·토큰·개인 경로가 없는지 확인한다.
 
