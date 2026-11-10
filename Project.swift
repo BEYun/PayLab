@@ -24,6 +24,7 @@ let modules: [(name: String, dependencies: [String])] = [
     (name: "DataKit", dependencies: ["Domain"]),
     (name: "DesignSystem", dependencies: []),
     (name: "HomeFeature", dependencies: ["Domain", "DesignSystem"]),
+    (name: "TransferFeature", dependencies: ["Domain", "DesignSystem"]),
 ]
 
 let app: Target = .target(
