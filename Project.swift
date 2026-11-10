@@ -22,6 +22,7 @@ func module(_ name: String, dependencies: [String]) -> [Target] {
 let modules: [(name: String, dependencies: [String])] = [
     (name: "Domain", dependencies: []),
     (name: "DataKit", dependencies: ["Domain"]),
+    (name: "DesignSystem", dependencies: []),
 ]
 
 let app: Target = .target(
