@@ -29,6 +29,7 @@ xcode-select가 Command Line Tools를 가리키면 먼저 `export DEVELOPER_DIR=
 ```bash
 tuist generate --no-open   # Project.swift 수정 후, 새 worktree에서 매번
 xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' -derivedDataPath .build/DerivedData build
+xcrun simctl boot "iPhone 18 Pro" 2>/dev/null   # 테스트 전 부팅 (꺼져 있으면 첫 테스트가 실패할 수 있음)
 xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' -derivedDataPath .build/DerivedData test
 xcrun simctl boot "iPhone 18 Pro" 2>/dev/null; xcrun simctl install booted .build/DerivedData/Build/Products/Debug-iphonesimulator/PayLab.app
 xcrun simctl launch --terminate-running-process booted com.example.paylab                   # 일반 실행

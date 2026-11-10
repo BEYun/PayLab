@@ -19,7 +19,7 @@ func module(_ name: String, dependencies: [String]) -> [Target] {
 }
 
 // 모듈 목록. 이후 task가 한 줄씩 추가한다.
-let modules: [(name: String, dependencies: [String])] = []
+let modules: [(name: String, dependencies: [String])] = [(name: "Domain", dependencies: [])]
 
 let app: Target = .target(
     name: "PayLab", destinations: .iOS, product: .app, bundleId: bundleID,
