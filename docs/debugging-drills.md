@@ -70,3 +70,35 @@
 - 뷰 계층·히트 영역을 덤프하는 도구는 없다. 지금은 탭과 로그를 하나씩 맞춰 보는 수작업이 대안이다.
 - 연습 절차 문제: `CLAUDE.md` 준비 명령의 `git branch --show-current`가 1단계의 git 금지 규칙과 부딪혔다. → 3회차부터 해결 에이전트 지시에 "`git branch --show-current`만 허용"을 넣는다.
 - 블라인드: `assume-unchanged`로 숨긴 뒤에는 B가 git status 누수를 보고하지 않았다.
+
+## 3회차 — 멈춤 (성공)
+
+**버그 신고 (A)**
+- 제목: 금액 입력 화면에서 "다음"을 누르면 앱이 굳고 풀리지 않음.
+- 재현: PayLab 통장 → 송금 → 김하늘 → 10000 → 다음 → 버튼이 눌린 채 굳음. 키패드·뒤로 가기 무반응. 10초 넘게 그대로.
+
+**정답 (A)**
+- 메인 스레드 교착. `TransferModel.proceedToConfirm()`(`@MainActor`)이 새 `latestBalance()`를 부른다. 이 함수는 `Task { fetchAccounts(); semaphore.signal() }` 뒤 `semaphore.wait()`로 기다린다 (`TransferModel.swift:56`, `:64-76`).
+- `Task`가 MainActor 격리를 물려받는다. 그래서 막힌 메인 스레드가 비기를 기다리며 영원히 시작하지 못한다.
+
+**B 1단계 (코드 안 봄)**
+- 용의 위치: 금액 입력 "다음" / 모델 / `TransferModel.proceedToConfirm()` → `latestBalance()`의 `DispatchSemaphore.wait`.
+- 결정적 근거:
+  ```text
+  2613 closure #1 in closure #1 in AmountInputView.body.getter  (in PayLab.debug.dylib) + 48
+  2613 TransferModel.proceedToConfirm()  (in PayLab.debug.dylib) + 204
+  2613 TransferModel.latestBalance()  (in PayLab.debug.dylib) + 400
+  2613 _dispatch_semaphore_wait_slow  (in libdispatch.dylib) + 128
+  2613 semaphore_wait_trap  (in libsystem_kernel.dylib) + 8
+  ```
+  - 두 번의 `sample`(30초 간격)이 같았다. CPU 0%.
+  - 로그는 `select recipient=rcp-1`에서 끊겼다. `confirm …`도, `request GET /accounts`도 없었다. 그래서 잔액 조회 작업이 시작조차 못 했다고 판단했다.
+- 추정 원리: 세마포어를 풀 작업이 메인 스레드(MainActor)를 기다리는 교착. 확신도 중간.
+
+**B 2단계:** 생략. 1단계가 정답 함수와 원리까지 맞혔다.
+
+**채점:** 성공. 1단계에서 정답 함수까지 좁혔다.
+
+**드러난 빈틈과 보강**
+- 멈춤 절차가 "앱 프레임에 머문 함수"까지만 말했다. 그 아래가 대기 함수인 경우(교착)를 해석하는 안내가 없었다. → `CLAUDE.md`에 `grep -A4`로 앱 프레임 아래를 보고, 계산이면 무거운 작업, 대기+CPU 0%면 교착이라는 구분을 추가했다. CPU 확인 명령(`ps -o %cpu`)도 넣었다.
+- 보강하지 않은 것: `latestBalance` 같은 새 코드에는 로그가 없다. 심은 버그 코드라 해당 없다.

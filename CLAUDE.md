@@ -96,6 +96,10 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
 **멈춤** (화면이 굳었다)
 - 멈춘 상태에서 `sample $PID 3 -file <scratchpad>/sample.txt` → `grep "PayLab.debug.dylib" <scratchpad>/sample.txt`로 앱 코드 프레임을 찾는다.
 - `com.apple.main-thread` 스레드가 앱 프레임에서 오래 머물면 그 함수가 원인이다. 정상 대기는 `mach_msg2_trap` / `__CFRunLoopServiceMachPort`다.
+- 앱 프레임 바로 아래도 본다: `grep -A4 "PayLab.debug.dylib" <scratchpad>/sample.txt`.
+  - 아래가 계산 함수면: 메인 스레드에서 무거운 일을 한다.
+  - 아래가 `semaphore_wait_trap` · `_dispatch_sync_f_slow` · `__psynch_mutexwait` 같은 대기이고 CPU가 0%면: 교착이다. 메인 스레드가 기다리는 일이 다른 스레드에서 돌고 있는지 확인한다. 그 일이 MainActor·메인 큐에서 돌아야 하면 영원히 풀리지 않는다.
+  - CPU 확인: `ps -o pid,%cpu,stat -p $PID`.
 
 **메모리 누수** (반복할수록 메모리가 는다)
 - `SIMCTL_CHILD_MallocStackLogging=1 xcrun simctl launch --terminate-running-process "$SIM" com.example.paylab`로 실행하고 PID를 다시 구한다.
