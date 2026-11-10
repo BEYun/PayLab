@@ -164,7 +164,10 @@ App ──> HomeFeature ─────┐
 ## 9. 다음 세션 인계 메모
 
 - **디버깅:** 네트워크 로거는 `URLProtocol` 계층에 붙이면 된다.
+  - `FakeServerURLProtocol`의 client 콜백은 `startLoading`을 부른 스레드가 아니라 백그라운드 Task에서 실행된다. 이론상 `stopLoading` 뒤에 도착할 수 있다. 이 계층에 계측을 붙일 때 확인할 것.
 - **테스트:** Domain 모델과 Feature의 `@Observable` 모델이 첫 대상.
+  - 가짜 서버 등록은 프로세스 전역이다(`FakeBackend.makeSession`). 서로 다른 `FakeServer` 설정을 쓰는 테스트가 동시에 돌면 서로 간섭한다. Swift Testing은 기본이 병렬 실행이다. 세션별 바인딩이나 직렬 실행은 해당 세션이 결정한다.
 - **CI:** GitHub 원격 저장소 생성 여부부터 결정.
 - **트랜잭션:** "트랜잭션"의 의미부터 결정 — 송금 정합성 / APM 구간 추적 / 로컬 DB.
+  - 가짜 서버 등록은 프로세스 전역이다(`FakeBackend.makeSession`). 서로 다른 `FakeServer` 설정을 쓰는 테스트가 동시에 돌면 서로 간섭한다. Swift Testing은 기본이 병렬 실행이다. 세션별 바인딩이나 직렬 실행은 해당 세션이 결정한다.
 - **성능:** CI 세션 이후 시작.

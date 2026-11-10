@@ -27,14 +27,20 @@
 xcode-select가 Command Line Tools를 가리키면 먼저 `export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
 
 ```bash
+brew install --cask tuist   # 최초 1회. 검증 버전 4.216.0
 tuist generate --no-open   # Project.swift 수정 후, 새 worktree에서 매번
-xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' -derivedDataPath .build/DerivedData build
-xcrun simctl boot "iPhone 18 Pro" 2>/dev/null   # 테스트 전 부팅 (꺼져 있으면 첫 테스트가 실패할 수 있음)
-xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination 'platform=iOS Simulator,name=iPhone 18 Pro,OS=27.0' -derivedDataPath .build/DerivedData test
-xcrun simctl boot "iPhone 18 Pro" 2>/dev/null; xcrun simctl install booted .build/DerivedData/Build/Products/Debug-iphonesimulator/PayLab.app
-xcrun simctl launch --terminate-running-process booted com.example.paylab                   # 일반 실행
-xcrun simctl launch --terminate-running-process booted com.example.paylab --fail-transfer   # 송금 실패 주입
+xcrun simctl list devices | grep -q "PayLab-$(git branch --show-current)" || xcrun simctl create "PayLab-$(git branch --show-current)" com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro   # 세션 시작 시 1회
+xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData build
+xcrun simctl boot "PayLab-$(git branch --show-current)" 2>/dev/null   # 테스트 전 부팅 (꺼져 있으면 첫 테스트가 실패할 수 있음)
+xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test
+xcrun simctl install "PayLab-$(git branch --show-current)" .build/DerivedData/Build/Products/Debug-iphonesimulator/PayLab.app
+xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-current)" com.example.paylab                   # 일반 실행
+xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-current)" com.example.paylab --fail-transfer   # 송금 실패 주입
 ```
+
+세션마다 브랜치 이름의 시뮬레이터(`PayLab-<브랜치>`)를 따로 쓴다. 병렬 세션이 서로의 앱과 테스트를 죽이지 않게 하기 위해서다.
+
+테스트는 Swift Testing(`import Testing`)이다. xcodebuild는 XCTest 번들마다 "Executed 0 tests"를 찍으므로, 실제 개수는 Swift Testing 줄에서 읽는다. 현재 6개.
 
 ## 금지
 - `*.xcodeproj`, `*.xcworkspace`, `Derived/`, `.build/` 커밋 금지
