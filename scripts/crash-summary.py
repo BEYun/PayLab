@@ -11,7 +11,7 @@ images = body.get("usedImages", [])
 thread = body["threads"][body["faultingThread"]]
 
 print("report:", path)
-print("time:", body.get("captureTime"))
+print("time:", body.get("captureTime"), " pid:", body.get("pid"))
 print("exception:", body.get("exception"))
 print("termination:", body.get("termination", {}).get("indicator"))
 for key, lines in (body.get("asi") or {}).items():  # 앱 메시지: Swift fatal error, Main Thread Checker 등

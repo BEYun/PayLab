@@ -141,3 +141,50 @@
 - `DYLD_SHARED_REGION…`, `not debuggable` 경고. → 잡음으로 적었다.
 - 설계 §8의 미확인 가정 "`leaks`가 누수 객체의 타입 이름을 보여 준다"가 확인됐다. `MallocStackLogging`을 켜고 실행하면 타입 이름, 순환 경로, 할당 스택이 모두 나온다.
 - 연습 절차 문제: 출제 에이전트가 공용 scratchpad에 버그 백업과 `leaks` 원본을 남겼다. 1·2회차의 정답 메모도 같은 곳에 있었다. → 해결 에이전트 투입 전에 비공개 폴더로 옮겼다. 해결 에이전트는 전용 하위 폴더만 쓰게 했다.
+
+## 5회차 — 메인 스레드 위반 크래시 (성공)
+
+**버그 신고 (A)**
+- 제목: 송금 확인에서 "보내기"를 누르면 앱이 꺼짐.
+- 재현: PayLab 통장 → 송금 → 김하늘 → 10000 → 다음 → 보내기 → 1초 안에 앱이 사라짐. 매번 재현.
+
+**정답 (A)**
+- `NotificationCenter` 콜백 스레드를 착각한 실수 (파일 3개 수정).
+- `HomeModel.init`이 `addObserver(forName: .accountBalanceDidChange, object: nil, queue: nil)`로 구독한다. `@Sendable` 블록의 컴파일 오류는 `MainActor.assumeIsolated { … }`로 막았다 (`HomeModel.swift:23`).
+- `RemoteBankingRepository.transfer(_:)`가 응답 직후 백그라운드(협력 스레드 풀)에서 알림을 post한다 (`:26-27`).
+- 그래서 `assumeIsolated`가 메인이 아닌 스레드에서 실행되고 `dispatch_assert_queue`에서 죽는다 (EXC_BREAKPOINT).
+
+**B 1단계 (코드 안 봄)**
+- 용의 위치: "보내기" → 저장소·모델 경계 / `RemoteBankingRepository.transfer(_:)`의 post → `HomeModel.init(repository:)`의 옵저버 `closure #1` → `MainActor.assumeIsolated`.
+- 결정적 근거:
+  - 로그: `response 200 POST /transfers` 뒤 `submit ok/failed` 없이 끊겼다.
+  - `crash-summary.py`: 스레드 queue `…cooperative`, 프레임 `_dispatch_assert_queue_fail` ← `MainActor.assumeIsolated` ← `closure #1 in HomeModel.init(repository:)` ← `postNotificationName` ← `RemoteBankingRepository.transfer(_:)` ← `TransferModel.submit()` ← `ConfirmView.body`.
+  - 시스템 로그(PID 조회): `BUG IN CLIENT OF LIBDISPATCH: Assertion failed: Block was expected to execute on queue [com.apple.main-thread …]`.
+  - 대조: `--fail-transfer` 실행에서는 크래시 없이 "송금 실패"가 떴다. 그래서 post는 성공 경로에만 있다고 판단했다.
+- 확신도: 크래시 지점과 원리 높음. 고칠 쪽(post 스레드 / 옵저버 큐)은 중간.
+
+**B 2단계:** 생략. 1단계가 정답 함수 두 개까지 맞혔다.
+
+**채점:** 성공. 1단계에서 정답 함수까지 좁혔다.
+
+**드러난 빈틈과 보강**
+- 결정적인 libdispatch 메시지가 앱 subsystem 로그에 없다. PID로 따로 조회해야 했다. → `crash-summary.py`가 pid를 출력한다. `CLAUDE.md`에 pid로 시스템 메시지를 조회하는 명령을 추가했다. `grep` 패턴은 UIKit "background assertion" 잡음을 피하려고 `Assertion failed`로 좁혔다.
+- 무반응 표에 "로그가 끊기고 앱이 사라짐 → 크래시 절차" 항목이 없었다. → 추가했다.
+- `EXC_BREAKPOINT` + `_dispatch_assert_queue_fail` + `cooperative` 큐의 해석 안내를 추가했다.
+- 보강하지 않은 것: 알림 post 로그. 심은 버그 코드라 해당 없다.
+
+## 요약
+
+| 회차 | 유형 | 1단계에서 좁힌 범위 | 결과 |
+|---|---|---|---|
+| 1 | 디코딩 불일치 | 엔드포인트·계층·원인 메커니즘 | 성공 |
+| 2 | 무반응·렌더링 | 화면·뷰·탭 영역 (후보 1번이 정답) | 성공 |
+| 3 | 멈춤 | 정답 함수 (`latestBalance`의 세마포어 대기) | 성공 |
+| 4 | 메모리 누수 | 타입·속성·순환 경로 (뷰는 추정) | 성공 |
+| 5 | 메인 스레드 위반 | 정답 함수 두 개 | 성공 |
+
+- 5회 모두 1단계(코드 안 봄)에서 정답 계층 이상까지 좁혔다. 같은 유형을 다시 연습할 일은 없었다.
+- 회차마다 드러난 빈틈은 `CLAUDE.md` 디버깅 섹션에 반영했다. 로그 코드 자체를 바꿀 필요는 없었다.
+- 연습 절차에서 드러난 블라인드 누수 두 가지와 대응:
+  - 자동 git status → `assume-unchanged`로 숨김.
+  - 공용 scratchpad → 정답 파일을 비공개 폴더로 옮기고, 해결 에이전트는 전용 하위 폴더만 씀.

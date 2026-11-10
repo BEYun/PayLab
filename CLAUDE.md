@@ -92,6 +92,7 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
 | `request`만 있고 `response`가 없음 | 응답이 오지 않음 | 가짜 서버 지연·`FakeServerURLProtocol` |
 | 비 2xx `response` / `decode failed` / `… failed` | 실패가 화면에서 삼켜짐 | 그 오류 |
 | `… ok`인데 스크린샷에 없음 | 모델은 정상, 뷰가 못 그림 | 그 화면 뷰 코드 |
+| 로그가 중간에 끊기고 앱이 사라짐 (예: `response 200` 뒤 `submit ok/failed` 없음) | 크래시 | 아래 "메인 스레드 위반·크래시" 절차 |
 
 **멈춤** (화면이 굳었다)
 - 멈춘 상태에서 `sample $PID 3 -file <scratchpad>/sample.txt` → `grep "PayLab.debug.dylib" <scratchpad>/sample.txt`로 앱 코드 프레임을 찾는다.
@@ -118,7 +119,10 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
   - `DYLD_SHARED_REGION=avoid not supported for simulator`, `Process … is not debuggable` 경고. 결과에는 영향이 없다.
 
 **메인 스레드 위반·크래시** (앱이 꺼졌다)
-- `python3 -I scripts/crash-summary.py` → 가장 최근 `~/Library/Logs/DiagnosticReports/PayLab-*.ips`의 예외, 종료 이유, 앱 메시지(Swift fatal error 등), 크래시 스레드 프레임.
+- `python3 -I scripts/crash-summary.py` → 가장 최근 `~/Library/Logs/DiagnosticReports/PayLab-*.ips`의 예외, 종료 이유, pid, 앱 메시지(Swift fatal error 등), 크래시 스레드 프레임.
+- 크래시 직전 시스템 메시지(`BUG IN CLIENT OF LIBDISPATCH …`, 런타임 assert 등)는 앱 subsystem 로그에 없다. 리포트의 pid로 따로 조회한다:
+  `xcrun simctl spawn "$SIM" log show --last 10m --style compact --predicate 'processID == <pid>' | grep -E "BUG IN CLIENT|Fatal error|Assertion failed"`
+- `EXC_BREAKPOINT` + `_dispatch_assert_queue_fail` + 크래시 스레드 queue가 `…cooperative`(메인 아님)면: 메인 전용 코드(`MainActor.assumeIsolated`, `@MainActor` 메서드)가 백그라운드에서 불렸다. 그 프레임 바로 위 앱 함수가 원인이고, 그 아래 앱 함수가 백그라운드에서 부른 쪽이다.
 - 재현할 때 Main Thread Checker를 켜면, 메인 스레드 전용 API를 다른 스레드에서 부를 때 바로 크래시하고 리포트가 남는다:
   `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib SIMCTL_CHILD_MTC_CRASH_ON_REPORT=1 xcrun simctl launch --terminate-running-process "$SIM" com.example.paylab`
 - 데이터 경쟁은 Thread Sanitizer 빌드로 본다. 보고는 stderr로 나오므로 `--console-pty`로 실행해 파일로 받는다. 끝나면 일반 빌드를 다시 설치한다.
