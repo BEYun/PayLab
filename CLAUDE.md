@@ -51,7 +51,7 @@ xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-curr
 | 카테고리 | 남기는 줄 |
 |---|---|
 | `app` | `launch failTransfers=<bool>` |
-| `network` | `request <메서드> /<경로>` · `response <상태> <메서드> /<경로> <ms>ms <바이트>B` · `body <메서드> /<경로> <원문>`(DEBUG 빌드만) · `decode failed <타입> <메서드> /<경로>: typeMismatch(Int) at [0].balance: <설명>` + 원문 `body` · `transport failed …` |
+| `network` | `request <메서드> /<경로>` · `response <상태> <메서드> /<경로> <ms>ms <바이트>B` · `body <메서드> /<경로> <원문>`(DEBUG 빌드만) · `decode failed <타입> <메서드> /<경로>: <종류>(<타입·키>) at <필드 경로>: <설명>` + 원문 `body` (예: `typeMismatch(Int) at [0].balance`, `keyNotFound(transferID) at <root>`) · `transport failed …` |
 | `home` | `load start` · `load ok accounts=<n>` · `load failed keep=<n>: <오류>` |
 | `transfer` | `recipients start/ok count=<n>/failed` · `select recipient=<id>` · `confirm amount=<n>` / `confirm blocked amountText=… amount=… balance=…` · `submit start/ok/failed` / `submit ignored recipient=… amount=…` |
 
@@ -73,6 +73,7 @@ xcrun simctl spawn "$SIM" log stream --level debug --style compact --predicate '
 xcrun simctl spawn "$SIM" log show --last 5m --info --debug --style compact --predicate 'subsystem == "com.example.paylab"'          # 이미 지나간 일 조회
 xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                                                                              # 화면 확인
 ```
+- `log stream` 첫 줄의 `getpwuid_r did not find a match for uid 501`은 잡음이다.
 - 화면 조작은 iOS 시뮬레이터 도구(`mcp__Claude_Code_iOS_Simulator__control`)의 `tap`·`screenshot`. 좌표는 포인트(402×874).
 - 금액 입력: `text` 동작은 붙여넣기라 막힌다. 금액 칸을 탭해 숫자 키패드를 띄운 뒤 키를 하나씩 탭한다.
 - 스크린샷은 탭보다 늦게 갱신될 수 있다. 화면이 안 바뀐 것 같으면 한 번 더 찍거나, 로그(`select`, `confirm` 등)로 탭이 들어갔는지 본다.
