@@ -154,3 +154,68 @@ gh pr checks                       # 현재 브랜치 PR의 CI 결과
 gh run list --limit 5              # 최근 실행
 gh run view <run-id> --log-failed  # 실패한 단계 로그만
 ```
+
+## 테스트
+
+설계: docs/superpowers/specs/2026-11-10-testing-design.md
+
+### 작업 흐름 (모든 작업)
+기능 명세서 → 설계 → 코드 + 테스트 코드 → 단위 테스트 → 통합 테스트 → 시뮬레이터 테스트(UI 테스트 + Claude 확인) → 커밋
+
+- 명세·설계는 `docs/superpowers/specs/`, 구현 계획은 `docs/superpowers/plans/`.
+- 새 코드에는 같은 작업 안에서 테스트를 함께 쓴다. 버그 수정은 재현 테스트를 먼저 쓴다.
+- 이미 있는 코드에 테스트를 붙이면, 대상 코드를 잠깐 망가뜨려 테스트가 실패하는지 확인하고 되돌린다.
+
+### 단계별 명령 (저장소 루트에서)
+```bash
+xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test -only-testing:DomainTests   # 단위: 모듈 하나 (타깃 이름 교체)
+xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test   # 단위 + 통합 (공용 PayLab 스킴, CI도 이것만)
+xcodebuild -workspace PayLab.xcworkspace -scheme PayLabUITests -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test   # UI
+scripts/test-all.sh   # 전체: 생성 → 시뮬레이터 → 단위·통합(커버리지) → UI → hook 테스트. 마지막 줄 ALL TESTS PASSED
+```
+
+### 테스트 위치
+| 단계 | 위치 | 대상 |
+|---|---|---|
+| 단위 | `Modules/<모듈>/Tests` | 순수 로직, `@Observable` 모델(타깃별 `StubBankingRepository` 주입), `FakeServer.handle` 직접 호출 |
+| 통합 | `DataKitTests`의 `RemoteBankingRepositoryTests`, `PayLabTests` | 모델 → `RemoteBankingRepository` → `URLSession` → 가짜 서버 |
+| UI | `Modules/App/UITests` (스킴 `PayLabUITests`) | 앱을 띄워 송금 성공·실패 흐름을 누름 |
+| Claude 확인 | 코드 없음 | 앱 설치·실행 후 iOS Simulator 제어 도구로 탭, 스크린샷 |
+
+### 규칙
+- 단위·통합은 Swift Testing, UI 테스트만 XCTest.
+- `FakeBackend.makeSession`(또는 `AppEnvironment.makeRepository`)을 부르는 테스트는 그 타깃의 `@Suite(.serialized)`에만 둔다. 등록이 프로세스 전역이라서다. 테스트 번들끼리는 프로세스가 달라 간섭하지 않는다.
+- 테스트의 가짜 서버는 `FakeServer(latency: .zero)`. 각 테스트가 자기 서버를 새로 만든다.
+- UI 테스트: 고정 sleep 금지, `waitForExistence`. 요소는 화면 텍스트로 찾고, 안 잡힐 때만 `.accessibilityIdentifier`를 단다.
+- Claude 확인: 작업 완료 보고에 스크린샷(`.build/screens/`)을 붙인다. 제어 도구의 텍스트 입력은 붙여넣기라 동작하지 않으니 숫자 키패드를 탭한다.
+- 제품 코드 동작이 이상해도 테스트 작업에서 고치지 않는다. 현재 동작을 테스트로 고정하고 기록한다(트랜잭션 인계: 위 설계 문서 부록 A).
+
+### 커밋 hook
+- `.claude/settings.json`의 `PreToolUse` hook: Claude가 `git commit`이 든 Bash 명령을 실행하면 먼저 `scripts/test-all.sh`를 돌린다. 실패하면 커밋을 막고 실패 요약을 보여 준다. 로그 `.build/hook-test.log`.
+- 막히면 테스트나 코드를 고친다. hook 설정을 끄거나 우회하지 않는다.
+- `PAYLAB_TEST_CMD` 환경 변수는 hook 자체 테스트(`scripts/test-hook.sh`) 전용이다.
+- 사람이 터미널에서 직접 하는 커밋은 막지 않는다.
+- `"onFailure": "block"`(hook이 시간 초과·실행 실패해도 커밋을 막음)은 Claude Code 2.1.295 이상에서 동작한다.
+- 세션 도중 처음 생긴 hook은 그 세션에 반영되지 않았다(2026-11-10 확인). 새 세션에서 실제로 커밋이 막히는지는 아직 확인하지 않았다.
+
+### 커버리지 (측정만, 차단 없음)
+```bash
+xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # scripts/test-all.sh 실행 후
+```
+
+기준선 (2026-11-10, PayLab 스킴 단위·통합, UI 테스트 제외):
+
+| 모듈 | 커버리지 | 메모 |
+|---|---|---|
+| Domain | 100% (26/26) | |
+| DataKit | 97.33% (146/150) | |
+| HomeFeature | 99.23% (129/130) | 테스트 호스트 앱이 홈 화면을 그려 뷰 코드까지 잡힘. `HomeModel` 100% |
+| TransferFeature | 15.54% (39/251) | 뷰 코드 0%. `TransferModel` 100% |
+| DesignSystem | 14.29% (4/28) | `formatWon` 100%, `PrimaryButton` 0% |
+| PayLab (App) | 74.29% (26/35) | `AppEnvironment` 100% |
+
+- 낮은 수치는 대부분 SwiftUI 뷰다. 로직 파일(`*Model`, `RemoteBankingRepository`, `AppEnvironment`, `formatWon`)이 100%에서 떨어지면 빠진 테스트를 찾는다.
+
+### 테스트 개수 (2026-11-10)
+- Swift Testing 30개(매개변수 테스트는 1개로 셈) + UI 테스트 2개 + hook 테스트 14개.
+- 위 "현재 6개"는 기반 단계 기준이다.

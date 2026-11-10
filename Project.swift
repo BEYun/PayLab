@@ -39,16 +39,24 @@ let appTests: Target = .target(
     deploymentTargets: deploymentTargets, sources: ["Modules/App/Tests/**"],
     dependencies: [.target(name: "PayLab")], settings: settings)
 
+// UI 테스트는 별도 스킴(PayLabUITests)에서만 돈다. 공용 PayLab 스킴·CI에는 넣지 않는다.
+let appUITests: Target = .target(
+    name: "PayLabUITests", destinations: .iOS, product: .uiTests, bundleId: "\(bundleID).uitests",
+    deploymentTargets: deploymentTargets, sources: ["Modules/App/UITests/**"],
+    dependencies: [.target(name: "PayLab")], settings: settings)
+
 let testTargets = ["PayLabTests"] + modules.map { "\($0.name)Tests" }
 
 let project = Project(
     name: "PayLab",
     options: .options(automaticSchemesOptions: .disabled),
-    targets: [app, appTests] + modules.flatMap { module($0.name, dependencies: $0.dependencies) },
+    targets: [app, appTests, appUITests] + modules.flatMap { module($0.name, dependencies: $0.dependencies) },
     schemes: [
         .scheme(name: "PayLab",
                 buildAction: .buildAction(targets: ["PayLab"]),
                 testAction: .targets(testTargets.map { .testableTarget(target: .target($0)) }),
                 runAction: .runAction(executable: "PayLab")),
+        .scheme(name: "PayLabUITests",
+                testAction: .targets([.testableTarget(target: .target("PayLabUITests"))])),
     ]
 )
