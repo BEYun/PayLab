@@ -42,7 +42,7 @@ jobs:
         run: xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "$DESTINATION" -derivedDataPath .build/DerivedData test-without-building
 
   claude-review:
-    if: github.event_name == 'pull_request' && github.event.action == 'opened' && github.event.pull_request.author_association == 'OWNER'  # PR이 열릴 때, 소유자 PR만
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.pull_request.author_association == 'OWNER'  # PR 열기·다시 열기, 소유자 PR만
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -64,6 +64,10 @@ jobs:
             특정 줄의 문제는 인라인 코멘트로, 전체 요약은 `gh pr comment`로 한 번만 남긴다. 한국어로 짧게 쓴다.
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+      - name: Claude 오류 출력
+        if: failure()
+        run: jq -r '.[] | select(.type == "result") | .result // empty' "$RUNNER_TEMP/claude-execution-output.json"  # 액션이 숨기는 실패 문구만
 
   claude-ci-failure:
     needs: build-and-test
@@ -97,3 +101,7 @@ jobs:
             소스를 읽고 실패 원인과 고치는 방법을 `gh pr comment`로 한 번만 남긴다. 코드는 고치지 않는다. 한국어로 짧게 쓴다.
           claude_args: |
             --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*)"
+
+      - name: Claude 오류 출력
+        if: failure()
+        run: jq -r '.[] | select(.type == "result") | .result // empty' "$RUNNER_TEMP/claude-execution-output.json"
