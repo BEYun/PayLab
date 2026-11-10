@@ -20,13 +20,16 @@ struct AccountRow: View {
                     .foregroundStyle(PayColor.textPrimary)
             }
             Spacer()
-            Button("송금") { onTransfer(account) }
-                .font(PayFont.body)
-                .foregroundStyle(.white)
-                .padding(.horizontal, PaySpacing.medium)
-                .padding(.vertical, PaySpacing.small)
-                .background(PayColor.primary)
-                .clipShape(Capsule())
+            Button { onTransfer(account) } label: {
+                Text("송금")
+                    .font(PayFont.body)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, PaySpacing.medium)
+                    .frame(minHeight: 44)
+                    .background(PayColor.primary)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
         }
         .padding(PaySpacing.medium)
         .background(PayColor.surface)
