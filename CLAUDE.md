@@ -65,6 +65,7 @@ SIM="PayLab-$(git branch --show-current)"
 xcrun simctl bootstatus "$SIM" -b   # 부팅 완료까지 대기. 부팅 직후 launch는 "No such process"로 실패할 수 있다
 xcrun simctl spawn "$SIM" log config --subsystem com.example.paylab --mode "level:debug,persist:debug"   # 시뮬레이터마다 1회. 안 하면 log show에서 debug 줄이 빠진다
 PID=$(xcrun simctl spawn "$SIM" launchctl list | awk '/com.example.paylab/ {print $1}')   # 이 시뮬레이터의 PayLab PID. pgrep은 다른 세션 시뮬레이터의 PayLab까지 잡는다
+UDID=$(xcrun simctl list devices | grep -F "$SIM (" | grep -oE '[0-9A-F-]{36}')            # 이 시뮬레이터 UDID. 크래시 리포트를 고를 때 쓴다
 ```
 
 ### 로그 읽기와 재현
@@ -119,7 +120,9 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
   - `DYLD_SHARED_REGION=avoid not supported for simulator`, `Process … is not debuggable` 경고. 결과에는 영향이 없다.
 
 **메인 스레드 위반·크래시** (앱이 꺼졌다)
-- `python3 -I scripts/crash-summary.py` → 가장 최근 `~/Library/Logs/DiagnosticReports/PayLab-*.ips`의 예외, 종료 이유, pid, 앱 메시지(Swift fatal error 등), 크래시 스레드 프레임.
+- `python3 -I scripts/crash-summary.py --device "$UDID"` → 이 시뮬레이터의 가장 최근 `~/Library/Logs/DiagnosticReports/PayLab-*.ips`에서 예외, 종료 이유, pid, 앱 메시지(Swift fatal error 등), 크래시 스레드 프레임을 보여 준다.
+  - `--device`를 빼면 다른 세션 시뮬레이터의 리포트를 고를 수 있다.
+  - 출력의 `time`이 재현 시각과 맞는지 먼저 본다.
 - 크래시 직전 시스템 메시지(`BUG IN CLIENT OF LIBDISPATCH …`, 런타임 assert 등)는 앱 subsystem 로그에 없다. 리포트의 pid로 따로 조회한다:
   `xcrun simctl spawn "$SIM" log show --last 10m --style compact --predicate 'processID == <pid>' | grep -E "BUG IN CLIENT|Fatal error|Assertion failed"`
 - `EXC_BREAKPOINT` + `_dispatch_assert_queue_fail` + 크래시 스레드 queue가 `…cooperative`(메인 아님)면: 메인 전용 코드(`MainActor.assumeIsolated`, `@MainActor` 메서드)가 백그라운드에서 불렸다. 그 프레임 바로 위 앱 함수가 원인이고, 그 아래 앱 함수가 백그라운드에서 부른 쪽이다.
