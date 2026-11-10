@@ -1,0 +1,9 @@
+# Tuist 생성물
+*.xcodeproj
+*.xcworkspace
+Derived/
+# 빌드 산출물
+.build/
+DerivedData/
+# macOS
+.DS_Store
