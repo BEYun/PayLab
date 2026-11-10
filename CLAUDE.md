@@ -87,6 +87,7 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
 | 로그 | 뜻 | 다음에 볼 곳 |
 |---|---|---|
 | 해당 동작의 로그가 아예 없음 | 모델 메서드가 불리지 않음 | 그 화면 뷰의 버튼·탭 연결 (`Modules/*/Sources/*View.swift`) |
+| 같은 버튼이 위치에 따라 로그가 찍히기도, 안 찍히기도 함 | 탭 영역이 보이는 모양보다 좁음 | 버튼 label 밖에 붙은 `.background`·`.padding`·`.frame`, `.contentShape` 누락. 탭 하나마다 로그를 확인해 반응하는 영역을 그려 본다 |
 | `confirm blocked` / `submit ignored` | guard에 막힘 | 로그에 찍힌 값과 조건 (`TransferRule`, `canProceed`) |
 | `request`만 있고 `response`가 없음 | 응답이 오지 않음 | 가짜 서버 지연·`FakeServerURLProtocol` |
 | 비 2xx `response` / `decode failed` / `… failed` | 실패가 화면에서 삼켜짐 | 그 오류 |
