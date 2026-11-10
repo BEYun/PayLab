@@ -102,3 +102,42 @@
 **드러난 빈틈과 보강**
 - 멈춤 절차가 "앱 프레임에 머문 함수"까지만 말했다. 그 아래가 대기 함수인 경우(교착)를 해석하는 안내가 없었다. → `CLAUDE.md`에 `grep -A4`로 앱 프레임 아래를 보고, 계산이면 무거운 작업, 대기+CPU 0%면 교착이라는 구분을 추가했다. CPU 확인 명령(`ps -o %cpu`)도 넣었다.
 - 보강하지 않은 것: `latestBalance` 같은 새 코드에는 로그가 없다. 심은 버그 코드라 해당 없다.
+
+## 4회차 — 메모리 누수 (성공)
+
+**버그 신고 (A)**
+- 제목: 송금 창을 열었다 닫을 때마다 앱 메모리가 조금씩 쌓이고, 닫은 뒤에도 줄지 않는다.
+- 재현: 송금 → 닫기를 여러 번 반복한다(끝까지 송금 → 확인도 같다). 화면 동작은 정상이다.
+
+**정답 (A)**
+- 순환 참조. `TransferFlowView.swift:25` `.onAppear { model.onFinish = { dismiss() } }`. `dismiss`는 `self.dismiss`라서 클로저가 뷰 구조체 전체를 캡처하고, 그 안의 `@State model` 저장소를 통해 `TransferModel`을 잡는다.
+- `TransferModel.swift:18` `public var onFinish`가 그 클로저를 강하게 보관한다. "닫기 로직을 모델로 옮기는 리팩터"처럼 위장했다(파일 5개 수정).
+
+**B 1단계 (코드 안 봄)**
+- 용의 위치: 송금 시트 / 모델과 뷰 사이 클로저 연결 / `TransferModel._onFinish` ↔ 클로저 컨텍스트 순환, `StoredLocation<TransferModel>` 경유.
+- 결정적 근거:
+  - `heap`의 `TransferModel` 개수가 시트를 연 횟수와 1:1로 늘었다(0 → 1 → 3 → 4).
+  - `leaks` 순환 트리:
+    ```text
+    ROOT CYCLE: <TransferModel 0x104574b40> [320]
+       __strong _onFinish.context --> ROOT CYCLE: <Closure context (unknown layout) 0x1045d2300> [64]
+          CYCLE BACK TO <TransferModel 0x104574b40> [320]
+          ROOT CYCLE: <SwiftUI.StoredLocation<TransferFeature.TransferModel> 0x1044346c0> [96]
+             __strong data.value._rawLayout.currentValue --> CYCLE BACK TO <TransferModel 0x104574b40> [320]
+    ```
+  - 로그는 모두 정상이었다. 로그만으로는 이 버그가 보이지 않는다.
+- 추정: 시트 안에서 `@State model`과 `@Environment(\.dismiss)`를 가진 뷰가 `model.onFinish = { … }`로 `self`를 캡처한다. 클로저가 만들어지는 정확한 뷰는 확신도 중간.
+
+**B 2단계 (코드 확인)**
+- `TransferFlowView.swift:25`로 확정했다. 정답과 일치한다.
+- "`dismiss()` 한 단어가 구조체 전체를 끌고 들어간다", "순환은 닫을 때가 아니라 열 때 생긴다"는 점을 코드에서 확인했다.
+
+**채점:** 성공. 1단계에서 타입·속성·순환 경로까지 좁혔다. 클로저를 만드는 뷰는 추정(중간)이었고, 2단계에서 맞혔다.
+
+**드러난 빈틈과 보강**
+- 클로저가 어디서 만들어졌는지 1단계에서 확정할 도구가 없었다. → 메인 세션이 같은 버그로 `malloc_history $PID <Closure context 주소>`를 확인했다. 할당 스택에 `closure #2 in TransferFlowView.body.getter`가 나왔다. 이 명령을 `CLAUDE.md`에 추가했다.
+- `leaks` 출력 읽는 법이 없었다(`_속성` = `@Observable` 속성, `StoredLocation` = `@State`, `PresentationMode` = 시트 dismiss). → `CLAUDE.md`에 추가했다.
+- `leaks`가 마지막 인스턴스 하나를 누수로 세지 않았다(보수적 스캔). → `heap` 개수를 기준으로 삼는다고 적었다.
+- `DYLD_SHARED_REGION…`, `not debuggable` 경고. → 잡음으로 적었다.
+- 설계 §8의 미확인 가정 "`leaks`가 누수 객체의 타입 이름을 보여 준다"가 확인됐다. `MallocStackLogging`을 켜고 실행하면 타입 이름, 순환 경로, 할당 스택이 모두 나온다.
+- 연습 절차 문제: 출제 에이전트가 공용 scratchpad에 버그 백업과 `leaks` 원본을 남겼다. 1·2회차의 정답 메모도 같은 곳에 있었다. → 해결 에이전트 투입 전에 비공개 폴더로 옮겼다. 해결 에이전트는 전용 하위 폴더만 쓰게 했다.

@@ -105,7 +105,17 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
 - `SIMCTL_CHILD_MallocStackLogging=1 xcrun simctl launch --terminate-running-process "$SIM" com.example.paylab`로 실행하고 PID를 다시 구한다.
 - `heap $PID | grep PayLab.debug.dylib` → 앱 타입별 인스턴스 수. 의심 동작(예: 송금 창 열고 닫기)을 N번 반복한 전후로 비교한다. 계속 느는 타입이 후보다.
 - `leaks $PID | sed -n '/leaks Report/,/Binary Images/p'` → 누수 객체, 순환 참조, 할당 스택.
-- 앱 시작 직후부터 있는 `ROOT LEAK: <non-object …> [32]` 1개(NO STACK)는 잡음이다.
+- 순환 트리 읽는 법:
+  - `__strong _onFinish.context`: `@Observable` 속성(`_` 접두)이 클로저를 강하게 잡는다.
+  - `Closure context`: 클로저가 캡처한 값 묶음.
+  - `StoredLocation<T>`: `@State` 저장소. 이게 보이면 클로저가 뷰 구조체 `self`를 캡처했다는 뜻이다.
+  - `PresentationMode` / `LocationBox<…Binding…>`: 시트의 `dismiss`.
+- 클로저가 어디서 만들어졌는지: 순환 트리의 `Closure context` 주소로 할당 스택을 본다. 출력의 마지막 앱 프레임이 그 클로저를 만든 함수다(예: `closure #2 in TransferFlowView.body.getter`).
+  `malloc_history $PID <주소> | grep "^ALLOC" | tr '|' '\n' | grep PayLab.debug.dylib | tail -3`
+- 기준은 `heap` 개수다. `leaks`는 보수적 스캔이라 일부 인스턴스를 누수로 세지 않을 수 있다.
+- 잡음:
+  - 앱 시작 직후부터 있는 `ROOT LEAK: <non-object …> [32]` 1개(NO STACK).
+  - `DYLD_SHARED_REGION=avoid not supported for simulator`, `Process … is not debuggable` 경고. 결과에는 영향이 없다.
 
 **메인 스레드 위반·크래시** (앱이 꺼졌다)
 - `python3 -I scripts/crash-summary.py` → 가장 최근 `~/Library/Logs/DiagnosticReports/PayLab-*.ips`의 예외, 종료 이유, 앱 메시지(Swift fatal error 등), 크래시 스레드 프레임.
