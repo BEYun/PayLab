@@ -217,7 +217,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 - 낮은 수치는 대부분 SwiftUI 뷰다. 로직 파일(`*Model`, `RemoteBankingRepository`, `AppEnvironment`, `formatWon`)이 100%에서 떨어지면 빠진 테스트를 찾는다.
 
 ### 테스트 개수 (2026-11-11)
-- Swift Testing 58개(매개변수 테스트는 1개로 셈) + UI 테스트 3개 + hook 테스트 14개.
+- Swift Testing 59개(매개변수 테스트는 1개로 셈) + UI 테스트 3개 + hook 테스트 14개.
 - 위 "현재 6개"는 기반 단계 기준이다.
 
 ## 트랜잭션 (송금 정합성)
