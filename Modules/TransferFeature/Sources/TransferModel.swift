@@ -1,4 +1,5 @@
 import Domain
+import Foundation
 import Observation
 import os
 
@@ -15,6 +16,8 @@ public final class TransferModel {
     public var amountText = ""
     public var path: [Step] = []
     public private(set) var outcome: Outcome?
+    /// 송금 한 건의 송금 키. proceedToConfirm을 통과할 때마다 새로 만든다.
+    public private(set) var idempotencyKey: String?
 
     private let repository: any BankingRepository
 
@@ -56,20 +59,21 @@ public final class TransferModel {
             log.error("confirm blocked amountText=\"\(self.amountText, privacy: .public)\" amount=\(self.amount.map(String.init) ?? "nil", privacy: .public) balance=\(self.fromAccount.balance, privacy: .public)")
             return
         }
+        idempotencyKey = UUID().uuidString
         log.info("confirm amount=\(self.amount ?? 0, privacy: .public)")
         path.append(.confirm)
     }
 
     /// 성공 → .success, 어떤 오류든 → .failure. 그다음 .result로 이동.
     public func submit() async {
-        guard let recipient = selectedRecipient, let amount else {
-            log.error("submit ignored recipient=\(self.selectedRecipient?.id ?? "nil", privacy: .public) amount=\(self.amount.map(String.init) ?? "nil", privacy: .public)")
+        guard let recipient = selectedRecipient, let amount, let key = idempotencyKey else {
+            log.error("submit ignored recipient=\(self.selectedRecipient?.id ?? "nil", privacy: .public) amount=\(self.amount.map(String.init) ?? "nil", privacy: .public) key=\(self.idempotencyKey ?? "nil", privacy: .public)")
             return
         }
         let request = TransferRequest(fromAccountID: fromAccount.id, recipientID: recipient.id, amount: amount)
-        log.info("submit start from=\(request.fromAccountID, privacy: .public) to=\(request.recipientID, privacy: .public) amount=\(amount, privacy: .public)")
+        log.info("submit start key=\(key, privacy: .public) from=\(request.fromAccountID, privacy: .public) to=\(request.recipientID, privacy: .public) amount=\(amount, privacy: .public)")
         do {
-            let receipt = try await repository.transfer(request)
+            let receipt = try await repository.transfer(request, idempotencyKey: key)
             log.info("submit ok transferID=\(receipt.transferID, privacy: .public) balanceAfter=\(receipt.balanceAfter, privacy: .public)")
             outcome = .success(receipt)
         } catch {

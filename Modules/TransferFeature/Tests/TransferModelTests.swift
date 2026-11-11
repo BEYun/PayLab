@@ -47,20 +47,32 @@ struct TransferModelTests {
         #expect(model.path == [.amount])
     }
 
+    @Test func proceedToConfirmMakesNewKey() throws {
+        let model = makeModel()
+        moveToConfirm(model)
+        let first = try #require(model.idempotencyKey)
+        model.path.removeLast()  // 확인 화면에서 뒤로
+        model.proceedToConfirm()
+        let second = try #require(model.idempotencyKey)
+        #expect(first != second)
+    }
+
     @Test func proceedToConfirmAppendsConfirm() {
         let model = makeModel()
         moveToConfirm(model)
         #expect(model.path == [.amount, .confirm])
     }
 
-    @Test func submitSuccess() async {
+    @Test func submitSuccess() async throws {
         let repository = StubBankingRepository(transfer: .success(receipt))
         let model = makeModel(repository)
         moveToConfirm(model)
         await model.submit()
         #expect(model.outcome == .success(receipt))
         #expect(model.path.last == .result)
-        #expect(repository.transferRequests == [TransferRequest(fromAccountID: "acc-1", recipientID: "rcp-1", amount: 1_000)])
+        let key = try #require(model.idempotencyKey)
+        #expect(repository.transferCalls == [.init(
+            request: TransferRequest(fromAccountID: "acc-1", recipientID: "rcp-1", amount: 1_000), idempotencyKey: key)])
     }
 
     @Test func submitFailure() async {
@@ -76,7 +88,7 @@ struct TransferModelTests {
         let model = makeModel(repository)
         model.amountText = "1000"
         await model.submit()
-        #expect(repository.transferRequests.isEmpty)
+        #expect(repository.transferCalls.isEmpty)
         #expect(model.outcome == nil)
         #expect(model.path == [])
     }

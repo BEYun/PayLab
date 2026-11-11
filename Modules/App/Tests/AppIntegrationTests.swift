@@ -1,5 +1,6 @@
 import DataKit
 import Domain
+import Foundation
 import HomeFeature
 import Testing
 import TransferFeature
@@ -11,7 +12,7 @@ import TransferFeature
 struct AppIntegrationTests {
     @Test func defaultArgumentsTransferSucceeds() async throws {
         let request = TransferRequest(fromAccountID: "acc-main", recipientID: "rcp-1", amount: 1_000)
-        let receipt = try await AppEnvironment.makeRepository(arguments: []).transfer(request)
+        let receipt = try await AppEnvironment.makeRepository(arguments: []).transfer(request, idempotencyKey: UUID().uuidString)
         #expect(receipt.balanceAfter == 1_249_000)
     }
 
@@ -19,7 +20,7 @@ struct AppIntegrationTests {
         let request = TransferRequest(fromAccountID: "acc-main", recipientID: "rcp-1", amount: 1_000)
         let repository = AppEnvironment.makeRepository(arguments: ["--fail-transfer"])
         await #expect(throws: BankingError.server(statusCode: 500)) {
-            try await repository.transfer(request)
+            try await repository.transfer(request, idempotencyKey: UUID().uuidString)
         }
     }
 

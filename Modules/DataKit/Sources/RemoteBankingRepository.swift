@@ -21,13 +21,26 @@ public struct RemoteBankingRepository: BankingRepository {
         try await send("GET", "recipients")
     }
 
-    public func transfer(_ request: TransferRequest) async throws -> TransferReceipt {
-        try await send("POST", "transfers", body: JSONEncoder().encode(request))
+    public func transfer(_ request: TransferRequest, idempotencyKey: String) async throws -> TransferReceipt {
+        try await send("POST", "transfers", body: JSONEncoder().encode(request),
+                       headers: [FakeServer.idempotencyKeyHeader: idempotencyKey])
     }
 
-    private func send<T: Decodable>(_ method: String, _ path: String, body: Data? = nil) async throws -> T {
+    public func findTransfer(idempotencyKey: String) async throws -> TransferReceipt? {
+        do {
+            return try await send("GET", "transfers/\(idempotencyKey)") as TransferReceipt
+        } catch BankingError.server(statusCode: 404) {
+            return nil
+        }
+    }
+
+    private func send<T: Decodable>(_ method: String, _ path: String, body: Data? = nil,
+                                    headers: [String: String] = [:]) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = method
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
