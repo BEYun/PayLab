@@ -48,9 +48,7 @@ struct AppIntegrationTests {
 
     @Test func failTransferEndsNotSentAndKeepsHomeBalance() async throws {
         let (home, transfer) = try await sendOneThousandWonFromMain(FakeServer(latency: .zero, failTransfers: true))
-        #expect(transfer.outcome == .pending)
-        await transfer.recheck()
-        #expect(transfer.outcome == .failure(.notSent))
+        #expect(transfer.outcome == .failure(.notSent))  // 재시도 3번 → 자동 조회 404
         await home.load()
         #expect(mainBalance(home) == 1_250_000)
     }
@@ -67,18 +65,16 @@ struct AppIntegrationTests {
         #expect(mainBalance(home) == 1_249_000)
     }
 
-    @Test func dropAlwaysPendingThenRecheckFindsTransfer() async throws {
+    @Test func dropAlwaysAutoCheckFindsTransfer() async throws {
         let (home, transfer) = try await sendOneThousandWonFromMain(
             FakeServer(latency: .zero, transferFault: .dropResponseAlways))
-        #expect(transfer.outcome == .pending)
-        await home.load()  // 확인 중에 창을 닫아도 홈은 서버 잔액(이미 차감)을 보여 준다
-        #expect(mainBalance(home) == 1_249_000)
-        await transfer.recheck()
-        if case .success(let receipt?) = transfer.outcome {
+        if case .success(let receipt?) = transfer.outcome {  // 재시도 3번 모두 끊김 → 자동 조회가 찾음
             #expect(receipt.balanceAfter == 1_249_000)
         } else {
-            Issue.record("다시 확인이 송금을 찾아야 한다: \(String(describing: transfer.outcome))")
+            Issue.record("자동 조회가 송금을 찾아야 한다: \(String(describing: transfer.outcome))")
         }
+        await home.load()
+        #expect(mainBalance(home) == 1_249_000)
     }
 
     @Test func garbleShowsSentWithoutReceipt() async throws {

@@ -35,7 +35,7 @@ xcrun simctl boot "PayLab-$(git branch --show-current)" 2>/dev/null   # 테스�
 xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test
 xcrun simctl install "PayLab-$(git branch --show-current)" .build/DerivedData/Build/Products/Debug-iphonesimulator/PayLab.app
 xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-current)" com.example.paylab                   # 일반 실행
-xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-current)" com.example.paylab --fail-transfer   # 처리 전 500 주입 (확인 중 → 다시 확인 → 송금 실패). 다른 실패 주입은 아래 "트랜잭션"
+xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-current)" com.example.paylab --fail-transfer   # 처리 전 500 주입 (로딩 → 송금 실패 · 보내지 않았어요). 다른 실패 주입은 아래 "트랜잭션"
 ```
 
 세션마다 브랜치 이름의 시뮬레이터(`PayLab-<브랜치>`)를 따로 쓴다. 병렬 세션이 서로의 앱과 테스트를 죽이지 않게 하기 위해서다.
@@ -53,7 +53,7 @@ xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-curr
 | `app` | `launch failTransfers=<bool>` |
 | `network` | `request <메서드> /<경로>` · `response <상태> <메서드> /<경로> <ms>ms <바이트>B` · `body <메서드> /<경로> <원문>`(DEBUG 빌드만) · `decode failed <타입> <메서드> /<경로>: <종류>(<타입·키>) at <필드 경로>: <설명>` + 원문 `body` (예: `typeMismatch(Int) at [0].balance`, `keyNotFound(transferID) at <root>`) · `transport failed …` |
 | `home` | `load start` · `load ok accounts=<n>` · `load failed keep=<n>: <오류>` |
-| `transfer` | `recipients start/ok count=<n>/failed` · `select recipient=<id>` · `confirm amount=<n>` / `confirm blocked amountText=… amount=… balance=…` · `submit start key=<키> …` · `submit ok` / `submit ok unreadable` / `submit rejected status=<n>` / `submit retry attempt=<n> after=<ms>ms: <오류>` / `submit pending key=… attempts=<n>` · `submit ignored inFlight/done` / `submit ignored recipient=… amount=… key=…` · `confirm ignored inFlight/done` · `recheck start/ok/notFound/failed` / `recheck ok unreadable` / `recheck ignored` |
+| `transfer` | `recipients start/ok count=<n>/failed` · `select recipient=<id>` · `confirm amount=<n>` / `confirm blocked amountText=… amount=… balance=…` · `submit start key=<키> …` · `submit ok` / `submit ok unreadable` / `submit rejected status=<n>` / `submit retry attempt=<n> after=<ms>ms: <오류>` / `submit check after attempts=<n>` · `submit check start/ok/notFound` / `submit check ok unreadable` / `submit unknown key=…: <오류>` · `submit ignored inFlight/done` / `submit ignored recipient=… amount=… key=…` · `confirm ignored inFlight/done` |
 
 - 레벨: debug = 요청·원문·시작, info = 성공, error = 실패·`blocked`·`ignored`·비 2xx 응답.
 - `body` 원문 길이가 `response` 줄의 바이트 수보다 짧으면 로그에서 잘린 것이다.
@@ -91,7 +91,7 @@ xcrun simctl io "$SIM" screenshot <scratchpad>/screen.png                       
 | 같은 버튼이 위치에 따라 로그가 찍히기도, 안 찍히기도 함 | 탭 영역이 보이는 모양보다 좁음 | 버튼 label 밖에 붙은 `.background`·`.padding`·`.frame`, `.contentShape` 누락. 탭 하나마다 로그를 확인해 반응하는 영역을 그려 본다 |
 | `confirm blocked` / `submit ignored` | guard에 막힘 | 로그에 찍힌 값과 조건 (`TransferRule`, `canProceed`) |
 | `request`만 있고 `response`가 없음 | 응답이 오지 않음 | 가짜 서버 지연·`FakeServerURLProtocol` |
-| 비 2xx `response` / `decode failed` / `… failed` | 실패가 화면에서 삼켜짐 | 그 오류. 예외: `POST /transfers`·`GET /transfers/<키>`의 `decode failed`는 의도대로 "보냈어요"(`submit ok unreadable` / `recheck ok unreadable`). 아래 "트랜잭션" |
+| 비 2xx `response` / `decode failed` / `… failed` | 실패가 화면에서 삼켜짐 | 그 오류. 예외: `POST /transfers`·`GET /transfers/<키>`의 `decode failed`는 의도대로 "보냈어요"(`submit ok unreadable` / `submit check ok unreadable`). 아래 "트랜잭션" |
 | `… ok`인데 스크린샷에 없음 | 모델은 정상, 뷰가 못 그림 | 그 화면 뷰 코드 |
 | 로그가 중간에 끊기고 앱이 사라짐 (예: `response 200` 뒤 `submit ok` 없음) | 크래시 | 아래 "메인 스레드 위반·크래시" 절차 |
 
@@ -228,7 +228,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 
 ### 송금 키
 - 송금 한 건 = 키 하나. `TransferModel.proceedToConfirm()`을 통과할 때마다 새 UUID(`idempotencyKey`).
-- HTTP 헤더 `Idempotency-Key`로 보낸다. 자동 재시도와 "다시 확인"은 같은 키를 쓴다.
+- HTTP 헤더 `Idempotency-Key`로 보낸다. 자동 재시도와 자동 조회는 같은 키를 쓴다. 송금이 시작되면 `proceedToConfirm()`은 무시돼 키가 바뀌지 않는다.
 - 가짜 서버 `POST /transfers` 판정 순서: 실패 주입 500 → 키 없음 400 → 본문 400 → **같은 키**(같은 본문: 200 + 저장된 영수증, 잔액 그대로 / 다른 본문: 422) → 계좌·받는 사람 404 → 금액 400 → 처리.
   - 같은 키 확인이 금액 검사보다 먼저다. 처리 뒤 잔액이 줄어든 상태의 재요청에도 저장된 영수증을 준다(`FakeServerTests.replayBeatsBalanceCheck`).
 - `GET /transfers/<키>`: 처리된 송금이면 200 + 영수증, 없으면 404. `findTransfer(idempotencyKey:)`는 404를 `nil`로 돌려준다.
@@ -239,25 +239,26 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 | 2xx | 했음 | 없음 | 보냈어요 + 남은 잔액 (`.success(receipt)`) |
 | 2xx + 디코딩 실패 | 했음 | 없음 | 보냈어요, 잔액 줄 없음 (`.success(nil)`) |
 | 4xx | 안 함 | 없음 | 송금 실패 + 이유 (`.failure(.rejected)`) |
-| 5xx, 전송 오류, 그 밖 | 모름 | 같은 키로 2회 (0.5초, 1초) | 확인 중 (`.pending`) |
+| 5xx, 전송 오류, 그 밖 | 모름 | 같은 키로 2회 (0.5초, 1초) | 키로 자동 조회 1번 (아래) |
 
-- 확인 중 → "다시 확인"(`recheck()`)은 조회만 한다. 찾음 → 보냈어요, 404 → 송금 실패 "보내지 않았어요"(`.failure(.notSent)`), 조회 실패 → 확인 중 유지.
+- 자동 조회는 조회만 한다(송금을 새로 만들지 않음). 찾음 → 보냈어요, 404 → 송금 실패 "보내지 않았어요"(`.failure(.notSent)`), 조회 실패 → "결과를 확인하지 못했어요"(`.unknown`, 버튼은 확인 하나).
+- 흐름: 보내기 → 로딩("보내는 중이에요", 재시도·조회가 끝날 때까지) → 결과. 사용자가 중간에 누를 것은 없다(사용자 피드백으로 개정, 설계 "개정 이력").
 - 송금 중(`isSubmitting`): "보내기" 비활성, 뒤로 가기 숨김, 시트 끌어내리기 막음. 결과가 나온 뒤의 `submit()`도 무시한다.
-- 앱을 껐다 켜면 확인 중 송금은 잊힌다(로컬 저장소 없음, 범위 밖).
+- `.unknown`은 지금 실패 주입으로 재현되지 않는다(조회 경로는 주입 대상이 아님). 단위 테스트로만 고정. 앱을 껐다 켜면 이 송금은 잊힌다(로컬 저장소 없음, 범위 밖).
 
 ### 실패 주입 (실행 인자)
 | 인자 | 서버 동작 | 기대 화면 |
 |---|---|---|
-| `--fail-transfer` | 처리 전 500, 매번 | 확인 중 → 다시 확인 → 송금 실패 "보내지 않았어요". 잔액 그대로 |
+| `--fail-transfer` | 처리 전 500, 매번 | 로딩 → 송금 실패 "보내지 않았어요" (자동 조회 404). 잔액 그대로 |
 | `--drop-transfer-response-once` | 처리 뒤 첫 200 응답만 연결 끊김 | 재시도 1번 → 보냈어요. 잔액 한 번 차감 |
-| `--drop-transfer-response` | 처리 뒤 200 응답을 매번 연결 끊김 | 확인 중 → 다시 확인 → 보냈어요. 잔액 한 번 차감 |
+| `--drop-transfer-response` | 처리 뒤 200 응답을 매번 연결 끊김 | 로딩 → 보냈어요 (자동 조회가 찾음). 잔액 한 번 차감 |
 | `--garble-transfer-response` | 처리 뒤 200 + 읽을 수 없는 본문 | 보냈어요 (잔액 줄 없음). 잔액 한 번 차감 |
 
 - 시작 로그: `launch failTransfers=<bool>`, `launch transferFault=<dropResponseOnce|dropResponseAlways|garbleResponse|none>`.
 - 실행: `xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-current)" com.example.paylab --drop-transfer-response`
-- 재현 확인은 로그로 한다: `request POST /transfers` 줄 수(원 요청 + 재시도), `submit retry`, `submit pending`, `recheck …`. 홈 잔액은 `body GET /accounts` 줄.
+- 재현 확인은 로그로 한다: `request POST /transfers` 줄 수(원 요청 + 재시도), `submit retry`, `submit check …`, `submit unknown`. 홈 잔액은 `body GET /accounts` 줄.
 
 ### 테스트 위치
 - 서버 계약: `FakeServerTests`(키·재요청·422·조회·실패 주입), `RemoteBankingRepositoryTests`(헤더 전송, 404 → nil, `URLError`·`DecodingError`).
-- 모델: `TransferModelTests` — 가짜 저장소 응답은 `StubBankingRepository.Reply`, 재시도 대기는 `retryDelays: [.zero, .zero]`. 연타 재현은 `holdFirstTransfer`/`holdFirstFind` + `waitUntilHeld()`/`release()`.
-- 통합: `AppIntegrationTests`(실패 주입 4가지 각각 화면 상태와 홈 잔액). UI: `TransferFlowUITests`(실패 → 확인 중 → 보내지 않았어요, 응답 유실 → 확인 중 → 보냈어요).
+- 모델: `TransferModelTests` — 가짜 저장소 응답은 `StubBankingRepository.Reply`, 재시도 대기는 `retryDelays: [.zero, .zero]`. 연타·송금 중 재현은 `holdFirstTransfer` + `waitUntilHeld()`/`release()`.
+- 통합: `AppIntegrationTests`(실패 주입 4가지 각각 화면 상태와 홈 잔액). UI: `TransferFlowUITests`(실패 → 로딩 → 보내지 않았어요, 응답 유실 → 로딩 → 보냈어요).

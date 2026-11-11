@@ -19,18 +19,14 @@ struct ResultView: View {
             case .failure(let reason):
                 Text("송금 실패").font(PayFont.title).foregroundStyle(PayColor.danger)
                 Text(reason.message).font(PayFont.body).foregroundStyle(PayColor.textSecondary)
-            case .pending:
-                Text("확인 중이에요").font(PayFont.title)
-                Text("송금이 처리됐는지 아직 몰라요. 잠시 후 다시 확인해 주세요.")
+            case .unknown:
+                Text("결과를 확인하지 못했어요").font(PayFont.title)
+                Text("홈에서 잔액을 확인해 주세요.")
                     .font(PayFont.body).foregroundStyle(PayColor.textSecondary)
-                    .multilineTextAlignment(.center)
             case nil:
                 EmptyView()
             }
             Spacer()
-            if model.outcome == .pending {
-                PrimaryButton("다시 확인", isEnabled: !model.isChecking) { Task { await model.recheck() } }
-            }
             PrimaryButton("확인", action: onFinish)
         }
         .padding(PaySpacing.medium)

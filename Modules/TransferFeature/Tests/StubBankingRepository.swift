@@ -5,7 +5,7 @@ import Testing
 
 /// 받는 사람·송금·조회 결과를 테스트가 정하고, 받은 요청과 키를 기록한다.
 /// 송금·조회 응답은 호출마다 앞에서 하나씩 쓰고, 다 쓰면 마지막을 반복한다.
-/// holdFirst…가 켜지면 첫 호출만 release() 전까지 멈춘다 (연타 재현용).
+/// holdFirstTransfer가 켜지면 첫 송금 호출만 release() 전까지 멈춘다 (연타 재현용).
 final class StubBankingRepository: BankingRepository {
     struct TransferCall: Equatable {
         let request: TransferRequest
@@ -44,16 +44,14 @@ final class StubBankingRepository: BankingRepository {
 
     private let recipients: Result<[Recipient], BankingError>
     private let holdFirstTransfer: Bool
-    private let holdFirstFind: Bool
     private let state: Mutex<State>
 
     init(recipients: Result<[Recipient], BankingError> = .success([]),
          transfers: [Reply] = [.server(500)],
          finds: [Reply] = [.notFound],
-         holdFirstTransfer: Bool = false, holdFirstFind: Bool = false) {
+         holdFirstTransfer: Bool = false) {
         self.recipients = recipients
         self.holdFirstTransfer = holdFirstTransfer
-        self.holdFirstFind = holdFirstFind
         self.state = Mutex(State(transfers: transfers, finds: finds))
     }
 
@@ -98,11 +96,10 @@ final class StubBankingRepository: BankingRepository {
     }
 
     func findTransfer(idempotencyKey: String) async throws -> TransferReceipt? {
-        let (reply, isFirst) = state.withLock { state in
+        let reply = state.withLock { state in
             state.findKeys.append(idempotencyKey)
-            return (Self.next(&state.finds), state.findKeys.count == 1)
+            return Self.next(&state.finds)
         }
-        if holdFirstFind && isFirst { await hold() }
         return try reply.receipt()
     }
 

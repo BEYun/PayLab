@@ -20,9 +20,7 @@ final class TransferFlowUITests: XCTestCase {
         app.launchArguments = ["--fail-transfer"]
         app.launch()
         sendOneThousandWon(app)
-        XCTAssertTrue(app.staticTexts["확인 중이에요"].waitForExistence(timeout: 10))  // 재시도 2번(0.5초, 1초) 뒤
-        app.buttons["다시 확인"].tap()
-        XCTAssertTrue(app.staticTexts["송금 실패"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["송금 실패"].waitForExistence(timeout: 10))  // 재시도 2번(0.5초, 1초)·자동 조회 뒤
         XCTAssertTrue(app.staticTexts["보내지 않았어요"].exists)
         app.buttons["확인"].tap()
         // 홈 재로드(300ms 지연)가 끝날 때까지 기다려야 깎인 잔액이 드러난다. 2초 안에 나타나면 실패.
@@ -30,17 +28,16 @@ final class TransferFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["1,250,000원"].exists)
     }
 
-    /// 서버는 처리했는데 응답이 매번 끊긴다 → 확인 중 → 다시 확인이 송금을 찾는다 → 잔액은 한 번만 빠진다.
+    /// 서버는 처리했는데 응답이 매번 끊긴다 → 로딩 동안 재시도·자동 조회 → 보냈어요 → 잔액은 한 번만 빠진다.
     @MainActor
-    func testDroppedResponseRecheckFindsTransfer() {
+    func testDroppedResponseAutoCheckFindsTransfer() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--drop-transfer-response"]
         app.launch()
         sendOneThousandWon(app)
-        XCTAssertTrue(app.staticTexts["확인 중이에요"].waitForExistence(timeout: 10))  // 재시도 2번(0.5초, 1초) 뒤
-        app.buttons["다시 확인"].tap()
-        XCTAssertTrue(app.staticTexts["보냈어요"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["보내는 중이에요"].waitForExistence(timeout: 5))  // 재시도 대기만 1.5초
+        XCTAssertTrue(app.staticTexts["보냈어요"].waitForExistence(timeout: 10))
         app.buttons["확인"].tap()
         XCTAssertTrue(app.staticTexts["1,249,000원"].waitForExistence(timeout: 5))
     }

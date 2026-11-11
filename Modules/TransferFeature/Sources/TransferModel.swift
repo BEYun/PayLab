@@ -11,12 +11,12 @@ public final class TransferModel {
     public enum Outcome: Equatable, Sendable {
         case success(TransferReceipt?)  // nil: 서버는 처리했지만 영수증을 읽지 못함
         case failure(FailureReason)
-        case pending                     // 서버가 처리했는지 모름
+        case unknown                     // 재시도와 자동 조회 뒤에도 서버가 처리했는지 모름
     }
 
     public enum FailureReason: Equatable, Sendable {
         case rejected(statusCode: Int)  // 4xx
-        case notSent                    // 다시 확인 결과 404
+        case notSent                    // 자동 조회 결과 404
 
         public var message: String {
             switch self {
@@ -36,8 +36,8 @@ public final class TransferModel {
     public private(set) var outcome: Outcome?
     /// 송금 한 건의 송금 키. proceedToConfirm을 통과할 때마다 새로 만든다.
     public private(set) var idempotencyKey: String?
+    /// 재시도와 자동 조회가 모두 끝날 때까지 true. 화면은 이 동안 로딩을 보여 준다.
     public private(set) var isSubmitting = false
-    public private(set) var isChecking = false
 
     private let repository: any BankingRepository
     private let retryDelays: [Duration]
@@ -78,7 +78,7 @@ public final class TransferModel {
         path = [.amount]
     }
 
-    /// 송금이 시작된 뒤(송금 중·결과 있음)에는 무시한다. 키가 바뀌면 다시 확인이 보낸 적 없는 키로 조회한다.
+    /// 송금이 시작된 뒤(송금 중·결과 있음)에는 무시한다. 한 송금의 키는 처음부터 끝까지 하나다.
     public func proceedToConfirm() {
         guard !isSubmitting, outcome == nil else {
             log.error("confirm ignored \(self.isSubmitting ? "inFlight" : "done", privacy: .public) key=\(self.idempotencyKey ?? "nil", privacy: .public)")
@@ -96,7 +96,8 @@ public final class TransferModel {
     /// 송금 중이거나 결과가 이미 있으면 무시한다. 결과는 .result로 이동해 보여 준다.
     /// - 2xx: 보냈어요 (본문을 못 읽어도 서버는 처리했다)
     /// - 4xx: 송금 실패. 재시도하지 않는다.
-    /// - 그 밖 (5xx, 전송 오류 등): 처리 여부를 모른다. 같은 키로 retryDelays만큼 다시 보내고, 그래도 모르면 확인 중.
+    /// - 그 밖 (5xx, 전송 오류 등): 처리 여부를 모른다. 같은 키로 retryDelays만큼 다시 보내고,
+    ///   그래도 모르면 키로 1번 조회한다 (찾음 → 보냈어요, 404 → 보내지 않았어요, 조회 실패 → 결과 모름).
     public func submit() async {
         guard !isSubmitting, outcome == nil else {
             log.error("submit ignored \(self.isSubmitting ? "inFlight" : "done", privacy: .public) key=\(self.idempotencyKey ?? "nil", privacy: .public)")
@@ -114,31 +115,6 @@ public final class TransferModel {
         path.append(.result)
     }
 
-    /// 확인 중일 때만. 키로 조회만 하고 송금을 새로 보내지 않는다. 재시도하지 않는다.
-    public func recheck() async {
-        guard outcome == .pending, !isChecking, let key = idempotencyKey else {
-            log.error("recheck ignored checking=\(self.isChecking, privacy: .public) outcome=\(String(describing: self.outcome), privacy: .public)")
-            return
-        }
-        isChecking = true
-        log.debug("recheck start key=\(key, privacy: .public)")
-        do {
-            if let receipt = try await repository.findTransfer(idempotencyKey: key) {
-                log.info("recheck ok transferID=\(receipt.transferID, privacy: .public) balanceAfter=\(receipt.balanceAfter, privacy: .public)")
-                outcome = .success(receipt)
-            } else {
-                log.error("recheck notFound key=\(key, privacy: .public)")
-                outcome = .failure(.notSent)
-            }
-        } catch is DecodingError {
-            log.error("recheck ok unreadable key=\(key, privacy: .public)")
-            outcome = .success(nil)
-        } catch {
-            log.error("recheck failed: \(String(describing: error), privacy: .public)")
-        }
-        isChecking = false
-    }
-
     private func send(_ request: TransferRequest, key: String) async -> Outcome {
         var attempt = 1
         while true {
@@ -154,14 +130,33 @@ public final class TransferModel {
                 return .failure(.rejected(statusCode: statusCode))
             } catch {
                 guard attempt <= retryDelays.count else {
-                    log.error("submit pending key=\(key, privacy: .public) attempts=\(attempt, privacy: .public): \(String(describing: error), privacy: .public)")
-                    return .pending
+                    log.error("submit check after attempts=\(attempt, privacy: .public): \(String(describing: error), privacy: .public)")
+                    return await check(key: key)
                 }
                 let delay = retryDelays[attempt - 1]
                 log.error("submit retry attempt=\(attempt, privacy: .public) after=\(Int(delay / .milliseconds(1)), privacy: .public)ms: \(String(describing: error), privacy: .public)")
                 try? await Task.sleep(for: delay)
                 attempt += 1
             }
+        }
+    }
+
+    /// 키로 조회만 한다. 송금을 새로 만들지 않고, 재시도하지 않는다.
+    private func check(key: String) async -> Outcome {
+        log.debug("submit check start key=\(key, privacy: .public)")
+        do {
+            guard let receipt = try await repository.findTransfer(idempotencyKey: key) else {
+                log.error("submit check notFound key=\(key, privacy: .public)")
+                return .failure(.notSent)
+            }
+            log.info("submit check ok transferID=\(receipt.transferID, privacy: .public) balanceAfter=\(receipt.balanceAfter, privacy: .public)")
+            return .success(receipt)
+        } catch is DecodingError {
+            log.error("submit check ok unreadable key=\(key, privacy: .public)")
+            return .success(nil)
+        } catch {
+            log.error("submit unknown key=\(key, privacy: .public): \(String(describing: error), privacy: .public)")
+            return .unknown
         }
     }
 }

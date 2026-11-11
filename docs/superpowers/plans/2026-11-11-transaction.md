@@ -278,3 +278,19 @@ git commit -m "test: 응답 유실 UI 테스트, CLAUDE.md 트랜잭션 섹션"
 - [ ] **Step 1:** 브랜치 전체 기록 검사: `git log -p origin/main..HEAD | grep -nE "/Users/|sk-|ghp_|token"`. Expected: 결과 없음 (설계 문서의 단어 "token" 등은 눈으로 확인).
 - [ ] **Step 2:** 공유 노트 폴더에 `transaction-handover.md` (남은 것, 성능 세션 참고).
 - [ ] **Step 3:** push·PR은 사용자 확인 후.
+
+---
+
+### Task 6: 사용자 피드백 — 확인 중 수동 단계 제거 (설계 "개정 이력")
+
+**Files:** `TransferModel.swift`, `ConfirmView.swift`, `ResultView.swift`, TransferFeature 테스트·가짜 저장소, `AppIntegrationTests.swift`, `TransferFlowUITests.swift`, `CLAUDE.md`
+
+**Interfaces (Task 3 대체):**
+- `Outcome.pending` → `Outcome.unknown` (조회마저 실패, 최종 결과). `recheck()`·`isChecking` 삭제 — 재시도가 다 실패하면 `submit()` 안에서 `findTransfer`를 1번 부른다. `isSubmitting`은 조회가 끝날 때까지 true.
+- 가짜 저장소 `holdFirstFind` 삭제 (쓰는 테스트 없음).
+- 로그: `submit check start key=` (debug) · `submit check ok …` (info) · `submit check ok unreadable` · `submit check notFound` · `submit unknown key=…: <오류>` (error). `submit pending`·`recheck …` 삭제.
+
+- [ ] **Step 1: RED** — 현재 코드로 컴파일되는 `retriesExhaustedThenAutoCheckFindsTransfer`: `transfers` 기본(500), `finds: [.receipt(receipt)]` → `submit()` 한 번 → `outcome == .success(receipt)`, `findKeys == [키]`. Expected: FAIL (`.pending`, 조회 0번).
+- [ ] **Step 2:** 모델·뷰 구현, 단위 테스트 갱신 (`recheckOutcome` → `autoCheckOutcome` 매개변수: receipt → success, notFound → failure(.notSent), unreadable → success(nil), server(500)·connectionLost → unknown; 4xx·성공·재시도 성공은 `findKeys.isEmpty`). `doubleRecheckQueriesOnce`·`recheckIgnoredUnlessPending` 삭제.
+- [ ] **Step 3:** 통합: `--fail-transfer` → 바로 `.failure(.notSent)`, 응답 유실 매번 → 바로 `.success(receipt?)`. UI: 두 테스트에서 "확인 중"·"다시 확인" 제거, 응답 유실 테스트에 `보내는 중이에요` 대기 추가.
+- [ ] **Step 4:** `CLAUDE.md` 갱신, `scripts/test-all.sh`, 시뮬레이터 확인(로딩·결과 스크린샷), 커밋.
