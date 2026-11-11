@@ -12,12 +12,12 @@ struct ConfirmView: View {
             Text("출금 계좌 \(model.fromAccount.name)")
                 .font(PayFont.caption).foregroundStyle(PayColor.textSecondary)
             Spacer()
-            PrimaryButton("보내기", isEnabled: !model.isSubmitting) { Task { await model.submit() } }
+            PrimaryButton("보내기") { Task { await model.submit() } }
         }
         .padding(PaySpacing.medium)
         .background(PayColor.background)
         .overlay {
-            if model.isSubmitting {  // 재시도·자동 조회가 끝날 때까지 로딩
+            if model.isSubmitting || model.outcome != nil {  // 결과 화면으로 넘어가는 동안에도 덮어 둔다
                 VStack(spacing: PaySpacing.medium) {
                     ProgressView()
                     Text("보내는 중이에요").font(PayFont.title)
@@ -27,6 +27,6 @@ struct ConfirmView: View {
             }
         }
         .navigationTitle("송금 확인")
-        .navigationBarBackButtonHidden(model.isSubmitting)
+        .navigationBarBackButtonHidden(model.isSubmitting || model.outcome != nil)
     }
 }

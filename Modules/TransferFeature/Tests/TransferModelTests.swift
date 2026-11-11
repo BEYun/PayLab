@@ -177,7 +177,7 @@ struct TransferModelTests {
 
     /// 재현(최종 리뷰): 송금 중 확인 화면이 pop되고 다시 "다음"을 누르면 키가 바뀌었다.
     /// 송금이 시작되면 키는 고정이고, 자동 조회도 보낸 키로 한다.
-    @Test func keyStaysFixedOnceSubmitStarts() async throws {
+    @Test(.timeLimit(.minutes(1))) func keyStaysFixedOnceSubmitStarts() async throws {  // 회귀 시 waitUntilHeld가 멈추지 않게
         let repository = StubBankingRepository(finds: [.receipt(receipt)], holdFirstTransfer: true)
         let model = makeModel(repository)
         moveToConfirm(model)
@@ -204,7 +204,7 @@ struct TransferModelTests {
     }
 
     /// 재현: 송금 중에 "보내기"를 다시 누르면 요청이 두 번 갔다.
-    @Test func doubleSubmitSendsOnce() async {
+    @Test(.timeLimit(.minutes(1))) func doubleSubmitSendsOnce() async {  // 회귀 시 waitUntilHeld가 멈추지 않게
         let repository = StubBankingRepository(transfers: [.receipt(receipt)], holdFirstTransfer: true)
         let model = makeModel(repository)
         moveToConfirm(model)
