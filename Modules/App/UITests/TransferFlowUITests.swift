@@ -30,6 +30,21 @@ final class TransferFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["1,250,000원"].exists)
     }
 
+    /// 서버는 처리했는데 응답이 매번 끊긴다 → 확인 중 → 다시 확인이 송금을 찾는다 → 잔액은 한 번만 빠진다.
+    @MainActor
+    func testDroppedResponseRecheckFindsTransfer() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--drop-transfer-response"]
+        app.launch()
+        sendOneThousandWon(app)
+        XCTAssertTrue(app.staticTexts["확인 중이에요"].waitForExistence(timeout: 10))  // 재시도 2번(0.5초, 1초) 뒤
+        app.buttons["다시 확인"].tap()
+        XCTAssertTrue(app.staticTexts["보냈어요"].waitForExistence(timeout: 5))
+        app.buttons["확인"].tap()
+        XCTAssertTrue(app.staticTexts["1,249,000원"].waitForExistence(timeout: 5))
+    }
+
     /// 홈 첫 계좌(PayLab 통장, 1,250,000원)에서 김하늘에게 1,000원 송금을 "보내기"까지 누른다.
     @MainActor
     private func sendOneThousandWon(_ app: XCUIApplication) {
