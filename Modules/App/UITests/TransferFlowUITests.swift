@@ -20,7 +20,10 @@ final class TransferFlowUITests: XCTestCase {
         app.launchArguments = ["--fail-transfer"]
         app.launch()
         sendOneThousandWon(app)
+        XCTAssertTrue(app.staticTexts["확인 중이에요"].waitForExistence(timeout: 10))  // 재시도 2번(0.5초, 1초) 뒤
+        app.buttons["다시 확인"].tap()
         XCTAssertTrue(app.staticTexts["송금 실패"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["보내지 않았어요"].exists)
         app.buttons["확인"].tap()
         // 홈 재로드(300ms 지연)가 끝날 때까지 기다려야 깎인 잔액이 드러난다. 2초 안에 나타나면 실패.
         XCTAssertFalse(app.staticTexts["1,249,000원"].waitForExistence(timeout: 2))

@@ -2,14 +2,28 @@ import Domain
 import Testing
 import TransferFeature
 
+private let savedReceipt = TransferReceipt(transferID: "tr-1", amount: 1_000, balanceAfter: 49_000)
+
 @MainActor
 struct TransferModelTests {
     let account = Account(id: "acc-1", name: "테스트 통장", maskedNumber: "1", balance: 50_000)
     let recipient = Recipient(id: "rcp-1", name: "김하늘", bankName: "국민은행", maskedNumber: "1")
-    let receipt = TransferReceipt(transferID: "tr-1", amount: 1_000, balanceAfter: 49_000)
+    let receipt = savedReceipt
 
+    /// 재시도 대기 0
     func makeModel(_ repository: StubBankingRepository = StubBankingRepository()) -> TransferModel {
-        TransferModel(fromAccount: account, repository: repository)
+        TransferModel(fromAccount: account, repository: repository, retryDelays: [.zero, .zero])
+    }
+
+    /// 송금 3번 모두 500 → 확인 중 상태의 모델
+    func makePendingModel(finds: [StubBankingRepository.Reply],
+                          holdFirstFind: Bool = false) async -> (TransferModel, StubBankingRepository) {
+        let repository = StubBankingRepository(finds: finds, holdFirstFind: holdFirstFind)
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        #expect(model.outcome == .pending)
+        return (model, repository)
     }
 
     /// 확인 화면까지 진행: 받는 사람 선택 → 금액 입력 → 다음
@@ -64,7 +78,7 @@ struct TransferModelTests {
     }
 
     @Test func submitSuccess() async throws {
-        let repository = StubBankingRepository(transfer: .success(receipt))
+        let repository = StubBankingRepository(transfers: [.receipt(receipt)])
         let model = makeModel(repository)
         moveToConfirm(model)
         await model.submit()
@@ -75,16 +89,134 @@ struct TransferModelTests {
             request: TransferRequest(fromAccountID: "acc-1", recipientID: "rcp-1", amount: 1_000), idempotencyKey: key)])
     }
 
-    @Test func submitFailure() async {
-        let model = makeModel()
+    @Test func unknownErrorThreeTimesBecomesPending() async {
+        let repository = StubBankingRepository()  // 500 반복
+        let model = makeModel(repository)
         moveToConfirm(model)
         await model.submit()
-        #expect(model.outcome == .failure)
+        #expect(model.outcome == .pending)
+        #expect(repository.transferCalls.count == 3)
         #expect(model.path.last == .result)
+        #expect(!model.isSubmitting)
+    }
+
+    @Test func unknownErrorRetriesWithSameKeyThenSucceeds() async throws {
+        let repository = StubBankingRepository(transfers: [.server(500), .connectionLost, .receipt(receipt)])
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        #expect(model.outcome == .success(receipt))
+        let key = try #require(model.idempotencyKey)
+        #expect(repository.transferCalls.count == 3)
+        #expect(repository.transferCalls.allSatisfy { $0.idempotencyKey == key })
+    }
+
+    @Test func otherErrorIsTreatedAsUnknown() async {
+        let repository = StubBankingRepository(transfers: [.cancelled])
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        #expect(model.outcome == .pending)
+        #expect(repository.transferCalls.count == 3)
+    }
+
+    @Test(arguments: [400, 404, 422])
+    func clientErrorIsRejectedWithoutRetry(statusCode: Int) async {
+        let repository = StubBankingRepository(transfers: [.server(statusCode)])
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        #expect(model.outcome == .failure(.rejected(statusCode: statusCode)))
+        #expect(repository.transferCalls.count == 1)
+        #expect(model.path.last == .result)
+        #expect(!model.isSubmitting)
+    }
+
+    @Test func submitAfterResultIsIgnored() async {
+        let repository = StubBankingRepository(transfers: [.receipt(receipt)])
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        await model.submit()
+        #expect(repository.transferCalls.count == 1)
+        #expect(model.path == [.amount, .confirm, .result])
+    }
+
+    @Test(arguments: [
+        (.receipt(savedReceipt), .success(savedReceipt)),
+        (.notFound, .failure(.notSent)),
+        (.unreadable, .success(nil)),
+        (.server(500), .pending),
+        (.connectionLost, .pending),
+    ] as [(StubBankingRepository.Reply, TransferModel.Outcome)])
+    func recheckOutcome(reply: StubBankingRepository.Reply, expected: TransferModel.Outcome) async throws {
+        let (model, repository) = await makePendingModel(finds: [reply])
+        await model.recheck()
+        #expect(model.outcome == expected)
+        #expect(repository.findKeys == [try #require(model.idempotencyKey)])
+        #expect(repository.transferCalls.count == 3)  // 다시 확인은 송금을 새로 보내지 않는다
+        #expect(!model.isChecking)
+    }
+
+    @Test func doubleRecheckQueriesOnce() async {
+        let (model, repository) = await makePendingModel(finds: [.receipt(receipt)], holdFirstFind: true)
+        let first = Task { await model.recheck() }
+        await repository.waitUntilHeld()
+        #expect(model.isChecking)
+        await model.recheck()  // 조회 중 두 번째 탭
+        repository.release()
+        await first.value
+        #expect(repository.findKeys.count == 1)
+        #expect(model.outcome == .success(receipt))
+    }
+
+    @Test func recheckIgnoredUnlessPending() async {
+        let repository = StubBankingRepository(transfers: [.receipt(receipt)])
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        await model.recheck()
+        #expect(repository.findKeys.isEmpty)
+        #expect(model.outcome == .success(receipt))
+    }
+
+    @Test(arguments: [
+        (.rejected(statusCode: 400), "금액을 확인해 주세요"),
+        (.rejected(statusCode: 404), "계좌나 받는 사람을 찾을 수 없어요"),
+        (.rejected(statusCode: 422), "요청을 처리할 수 없어요"),
+        (.notSent, "보내지 않았어요"),
+    ] as [(TransferModel.FailureReason, String)])
+    func failureReasonMessage(reason: TransferModel.FailureReason, expected: String) {
+        #expect(reason.message == expected)
+    }
+
+    /// 재현: 송금 중에 "보내기"를 다시 누르면 요청이 두 번 갔다.
+    @Test func doubleSubmitSendsOnce() async {
+        let repository = StubBankingRepository(transfers: [.receipt(receipt)], holdFirstTransfer: true)
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        let first = Task { await model.submit() }
+        await repository.waitUntilHeld()
+        await model.submit()  // 송금 중 두 번째 탭
+        #expect(model.isSubmitting)
+        repository.release()
+        await first.value
+        #expect(repository.transferCalls.count == 1)
+        #expect(model.outcome == .success(receipt))
+    }
+
+    /// 재현: 서버는 처리했는데(200) 본문을 못 읽으면 "송금 실패"로 보였다.
+    @Test func decodingErrorMeansSent() async {
+        let repository = StubBankingRepository(transfers: [.unreadable])
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        await model.submit()
+        #expect(model.outcome == .success(nil))
+        #expect(repository.transferCalls.count == 1)
     }
 
     @Test func submitWithoutRecipientDoesNothing() async {
-        let repository = StubBankingRepository(transfer: .success(receipt))
+        let repository = StubBankingRepository(transfers: [.receipt(receipt)])
         let model = makeModel(repository)
         model.amountText = "1000"
         await model.submit()

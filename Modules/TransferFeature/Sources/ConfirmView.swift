@@ -12,10 +12,11 @@ struct ConfirmView: View {
             Text("출금 계좌 \(model.fromAccount.name)")
                 .font(PayFont.caption).foregroundStyle(PayColor.textSecondary)
             Spacer()
-            PrimaryButton("보내기") { Task { await model.submit() } }
+            PrimaryButton("보내기", isEnabled: !model.isSubmitting) { Task { await model.submit() } }
         }
         .padding(PaySpacing.medium)
         .background(PayColor.background)
         .navigationTitle("송금 확인")
+        .navigationBarBackButtonHidden(model.isSubmitting)
     }
 }

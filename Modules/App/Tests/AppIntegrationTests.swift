@@ -36,31 +36,70 @@ struct AppIntegrationTests {
     }
 
     @Test func successfulTransferShowsOnHome() async throws {
-        let (home, transfer) = try await sendOneThousandWonFromMain(failTransfers: false)
-        if case .success(let receipt) = transfer.outcome {
+        let (home, transfer) = try await sendOneThousandWonFromMain(FakeServer(latency: .zero))
+        if case .success(let receipt?) = transfer.outcome {
             #expect(receipt.balanceAfter == 1_249_000)
         } else {
             Issue.record("송금이 성공해야 한다: \(String(describing: transfer.outcome))")
         }
         await home.load()
-        #expect(home.accounts.first { $0.id == "acc-main" }?.balance == 1_249_000)
+        #expect(mainBalance(home) == 1_249_000)
     }
 
-    @Test func failedTransferKeepsHomeBalance() async throws {
-        let (home, transfer) = try await sendOneThousandWonFromMain(failTransfers: true)
-        #expect(transfer.outcome == .failure)
+    @Test func failTransferEndsNotSentAndKeepsHomeBalance() async throws {
+        let (home, transfer) = try await sendOneThousandWonFromMain(FakeServer(latency: .zero, failTransfers: true))
+        #expect(transfer.outcome == .pending)
+        await transfer.recheck()
+        #expect(transfer.outcome == .failure(.notSent))
         await home.load()
-        #expect(home.accounts.first { $0.id == "acc-main" }?.balance == 1_250_000)
+        #expect(mainBalance(home) == 1_250_000)
     }
 
-    /// 홈을 불러와 acc-main에서 첫 받는 사람에게 1,000원 송금을 마칠 때까지 진행한다.
-    private func sendOneThousandWonFromMain(failTransfers: Bool) async throws -> (HomeModel, TransferModel) {
-        let repository = RemoteBankingRepository(session: FakeBackend.makeSession(
-            server: FakeServer(latency: .zero, failTransfers: failTransfers)))
+    @Test func dropOnceRetriesToSuccess() async throws {
+        let (home, transfer) = try await sendOneThousandWonFromMain(
+            FakeServer(latency: .zero, transferFault: .dropResponseOnce))
+        if case .success(let receipt?) = transfer.outcome {
+            #expect(receipt.balanceAfter == 1_249_000)
+        } else {
+            Issue.record("재시도가 영수증을 받아야 한다: \(String(describing: transfer.outcome))")
+        }
+        await home.load()
+        #expect(mainBalance(home) == 1_249_000)
+    }
+
+    @Test func dropAlwaysPendingThenRecheckFindsTransfer() async throws {
+        let (home, transfer) = try await sendOneThousandWonFromMain(
+            FakeServer(latency: .zero, transferFault: .dropResponseAlways))
+        #expect(transfer.outcome == .pending)
+        await home.load()  // 확인 중에 창을 닫아도 홈은 서버 잔액(이미 차감)을 보여 준다
+        #expect(mainBalance(home) == 1_249_000)
+        await transfer.recheck()
+        if case .success(let receipt?) = transfer.outcome {
+            #expect(receipt.balanceAfter == 1_249_000)
+        } else {
+            Issue.record("다시 확인이 송금을 찾아야 한다: \(String(describing: transfer.outcome))")
+        }
+    }
+
+    @Test func garbleShowsSentWithoutReceipt() async throws {
+        let (home, transfer) = try await sendOneThousandWonFromMain(
+            FakeServer(latency: .zero, transferFault: .garbleResponse))
+        #expect(transfer.outcome == .success(nil))
+        await home.load()
+        #expect(mainBalance(home) == 1_249_000)
+    }
+
+    private func mainBalance(_ home: HomeModel) -> Int? {
+        home.accounts.first { $0.id == "acc-main" }?.balance
+    }
+
+    /// 홈을 불러와 acc-main에서 첫 받는 사람에게 1,000원 송금을 마칠 때까지 진행한다. 재시도 대기 0.
+    private func sendOneThousandWonFromMain(_ server: FakeServer) async throws -> (HomeModel, TransferModel) {
+        let repository = RemoteBankingRepository(session: FakeBackend.makeSession(server: server))
         let home = HomeModel(repository: repository)
         await home.load()
         let main = try #require(home.accounts.first { $0.id == "acc-main" })
-        let transfer = TransferModel(fromAccount: main, repository: repository)
+        let transfer = TransferModel(fromAccount: main, repository: repository, retryDelays: [.zero, .zero])
         await transfer.loadRecipients()
         transfer.select(try #require(transfer.recipients.first))
         transfer.amountText = "1000"
