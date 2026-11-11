@@ -19,10 +19,15 @@ final class FakeServerURLProtocol: URLProtocol, @unchecked Sendable {
         }
         let method = request.httpMethod ?? "GET"
         let body = request.httpBody ?? request.httpBodyStream.map(Self.readAll)
+        let headers = request.allHTTPHeaderFields ?? [:]
         loadingTask = Task {
             try? await Task.sleep(for: server.latency)
             if Task.isCancelled { return }
-            let result = server.handle(method: method, path: url.path, body: body)
+            let result = server.handle(method: method, path: url.path, headers: headers, body: body)
+            if result.dropsConnection {
+                self.client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+                return
+            }
             let response = HTTPURLResponse(url: url, statusCode: result.statusCode, httpVersion: "HTTP/1.1",
                                            headerFields: ["Content-Type": "application/json"])!
             self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

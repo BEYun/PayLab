@@ -23,5 +23,6 @@ public struct TransferFlowView: View {
                     }
                 }
         }
+        .interactiveDismissDisabled(model.isSubmitting)  // 송금 중 창을 닫으면 홈이 반영 전 잔액을 불러온다
     }
 }
