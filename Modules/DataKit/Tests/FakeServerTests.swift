@@ -100,11 +100,49 @@ struct FakeServerTests {
         #expect(server.handle(method: "GET", path: "/transfers/none", body: nil).statusCode == 404)
     }
 
+    @Test func dropResponseOnceDropsFirstOnly() throws {
+        let faulty = FakeServer(latency: .zero, transferFault: .dropResponseOnce)
+        let first = post(try transferBody(amount: 1_000), key: "K", to: faulty)
+        #expect(first.dropsConnection)
+        #expect(try balance(of: "acc-saving", in: faulty) == 49_000)
+        let second = post(try transferBody(amount: 1_000), key: "K", to: faulty)
+        #expect(!second.dropsConnection)
+        #expect(second.statusCode == 200)
+        let found = faulty.handle(method: "GET", path: "/transfers/K", body: nil)
+        #expect(try receipt(second.body) == receipt(found.body))
+        #expect(try balance(of: "acc-saving", in: faulty) == 49_000)
+    }
+
+    @Test func dropResponseAlwaysDropsEveryReplay() throws {
+        let faulty = FakeServer(latency: .zero, transferFault: .dropResponseAlways)
+        #expect(post(try transferBody(amount: 1_000), key: "K", to: faulty).dropsConnection)
+        #expect(post(try transferBody(amount: 1_000), key: "K", to: faulty).dropsConnection)
+        let found = faulty.handle(method: "GET", path: "/transfers/K", body: nil)
+        #expect(found.statusCode == 200)
+        #expect(!found.dropsConnection)
+        #expect(try balance(of: "acc-saving", in: faulty) == 49_000)
+    }
+
+    @Test func garbleResponseCommitsWithUnreadableBody() throws {
+        let faulty = FakeServer(latency: .zero, transferFault: .garbleResponse)
+        let result = post(try transferBody(amount: 1_000), key: "K", to: faulty)
+        #expect(result.statusCode == 200)
+        #expect(!result.dropsConnection)
+        #expect(throws: DecodingError.self) { try receipt(result.body) }
+        #expect(try balance(of: "acc-saving", in: faulty) == 49_000)
+    }
+
+    @Test func faultsDoNotTouchRejections() throws {
+        let faulty = FakeServer(latency: .zero, transferFault: .dropResponseAlways)
+        let result = post(try transferBody(amount: 0), key: "K", to: faulty)
+        #expect(result.statusCode == 400)
+        #expect(!result.dropsConnection)
+    }
+
     /// 키를 주지 않으면 호출마다 새 키. key: nil이면 헤더 없음.
-    private func post(_ body: Data?, key: String? = UUID().uuidString) -> (statusCode: Int, body: Data) {
+    private func post(_ body: Data?, key: String? = UUID().uuidString, to target: FakeServer? = nil) -> FakeServer.Response {
         let headers = key.map { [FakeServer.idempotencyKeyHeader: $0] } ?? [:]
-        let result = server.handle(method: "POST", path: "/transfers", headers: headers, body: body)
-        return (result.statusCode, result.body)
+        return (target ?? server).handle(method: "POST", path: "/transfers", headers: headers, body: body)
     }
 
     private func postTransfer(_ body: Data?) -> Int {

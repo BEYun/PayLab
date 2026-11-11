@@ -24,6 +24,17 @@ struct AppIntegrationTests {
         }
     }
 
+    @Test(arguments: [
+        ([], nil),
+        (["--drop-transfer-response-once"], .dropResponseOnce),
+        (["--drop-transfer-response"], .dropResponseAlways),
+        (["--garble-transfer-response"], .garbleResponse),
+        (["--drop-transfer-response", "--drop-transfer-response-once"], .dropResponseOnce),  // 표 앞쪽이 이김
+    ] as [([String], TransferFault?)])
+    func transferFaultArguments(arguments: [String], expected: TransferFault?) {
+        #expect(AppEnvironment.transferFault(arguments: arguments) == expected)
+    }
+
     @Test func successfulTransferShowsOnHome() async throws {
         let (home, transfer) = try await sendOneThousandWonFromMain(failTransfers: false)
         if case .success(let receipt) = transfer.outcome {

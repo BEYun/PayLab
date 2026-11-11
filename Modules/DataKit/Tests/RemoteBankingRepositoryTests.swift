@@ -6,9 +6,9 @@ import Testing
 // 가짜 서버 등록(FakeBackend.makeSession)은 프로세스 전역이라 이 Suite는 직렬로 돈다.
 @Suite(.serialized)
 struct RemoteBankingRepositoryTests {
-    func makeRepository(failTransfers: Bool = false) -> RemoteBankingRepository {
+    func makeRepository(failTransfers: Bool = false, transferFault: TransferFault? = nil) -> RemoteBankingRepository {
         RemoteBankingRepository(session: FakeBackend.makeSession(
-            server: FakeServer(latency: .zero, failTransfers: failTransfers)))
+            server: FakeServer(latency: .zero, failTransfers: failTransfers, transferFault: transferFault)))
     }
 
     @Test func fetchAccountsDecodesSeed() async throws {
@@ -61,5 +61,23 @@ struct RemoteBankingRepositoryTests {
             TransferRequest(fromAccountID: "acc-main", recipientID: "rcp-1", amount: 1_000), idempotencyKey: "K")
         #expect(try await repository.findTransfer(idempotencyKey: "K") == receipt)
         #expect(try await repository.findTransfer(idempotencyKey: "none") == nil)
+    }
+
+    @Test func droppedResponseThrowsURLError() async throws {
+        let repository = makeRepository(transferFault: .dropResponseAlways)
+        let request = TransferRequest(fromAccountID: "acc-main", recipientID: "rcp-1", amount: 1_000)
+        await #expect(throws: URLError.self) {
+            try await repository.transfer(request, idempotencyKey: "K")
+        }
+        let found = try await repository.findTransfer(idempotencyKey: "K")
+        #expect(found?.amount == 1_000)
+    }
+
+    @Test func garbledResponseThrowsDecodingError() async {
+        let repository = makeRepository(transferFault: .garbleResponse)
+        await #expect(throws: DecodingError.self) {
+            try await repository.transfer(
+                TransferRequest(fromAccountID: "acc-main", recipientID: "rcp-1", amount: 1_000), idempotencyKey: "K")
+        }
     }
 }
