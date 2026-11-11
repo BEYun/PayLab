@@ -158,6 +158,25 @@ struct TransferModelTests {
         #expect(!model.isChecking)
     }
 
+    /// 재현(최종 리뷰): 송금 중 확인 화면이 pop되고 다시 "다음"을 누르면 키가 바뀌어,
+    /// 다시 확인이 보낸 적 없는 키로 조회하고 "보내지 않았어요"를 보여 줄 수 있었다.
+    @Test func keyStaysFixedOnceSubmitStarts() async throws {
+        let repository = StubBankingRepository(finds: [.receipt(receipt)], holdFirstTransfer: true)
+        let model = makeModel(repository)
+        moveToConfirm(model)
+        let first = Task { await model.submit() }
+        await repository.waitUntilHeld()
+        model.path.removeLast()   // 송금 중 확인 화면이 pop됨
+        model.proceedToConfirm()  // 금액 화면에서 "다음"
+        repository.release()
+        await first.value
+        let sentKey = try #require(repository.transferCalls.first?.idempotencyKey)
+        #expect(model.idempotencyKey == sentKey)
+        await model.recheck()
+        #expect(repository.findKeys == [sentKey])
+        #expect(model.outcome == .success(receipt))
+    }
+
     @Test func doubleRecheckQueriesOnce() async {
         let (model, repository) = await makePendingModel(finds: [.receipt(receipt)], holdFirstFind: true)
         let first = Task { await model.recheck() }

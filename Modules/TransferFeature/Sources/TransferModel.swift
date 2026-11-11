@@ -78,7 +78,12 @@ public final class TransferModel {
         path = [.amount]
     }
 
+    /// 송금이 시작된 뒤(송금 중·결과 있음)에는 무시한다. 키가 바뀌면 다시 확인이 보낸 적 없는 키로 조회한다.
     public func proceedToConfirm() {
+        guard !isSubmitting, outcome == nil else {
+            log.error("confirm ignored \(self.isSubmitting ? "inFlight" : "done", privacy: .public) key=\(self.idempotencyKey ?? "nil", privacy: .public)")
+            return
+        }
         guard canProceed else {
             log.error("confirm blocked amountText=\"\(self.amountText, privacy: .public)\" amount=\(self.amount.map(String.init) ?? "nil", privacy: .public) balance=\(self.fromAccount.balance, privacy: .public)")
             return
