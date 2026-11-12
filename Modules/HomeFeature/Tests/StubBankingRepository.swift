@@ -2,16 +2,23 @@ import Domain
 import Synchronization
 import Testing
 
-/// fetchAccounts 결과를 테스트가 정한다. 나머지 메서드는 HomeModel이 부르지 않는다.
+/// fetchAccounts·fetchTransactions 결과를 테스트가 정한다. 나머지 메서드는 HomeFeature 모델이 부르지 않는다.
 final class StubBankingRepository: BankingRepository {
     private let accounts: Mutex<Result<[Account], BankingError>>
+    private let transactions: Mutex<Result<[Transaction], BankingError>>
 
-    init(accounts: Result<[Account], BankingError>) {
+    init(accounts: Result<[Account], BankingError>,
+         transactions: Result<[Transaction], BankingError> = .success([])) {
         self.accounts = Mutex(accounts)
+        self.transactions = Mutex(transactions)
     }
 
     func setAccounts(_ result: Result<[Account], BankingError>) {
         accounts.withLock { $0 = result }
+    }
+
+    func setTransactions(_ result: Result<[Transaction], BankingError>) {
+        transactions.withLock { $0 = result }
     }
 
     func fetchAccounts() async throws -> [Account] {
@@ -24,8 +31,7 @@ final class StubBankingRepository: BankingRepository {
     }
 
     func fetchTransactions(accountID: String) async throws -> [Transaction] {
-        Issue.record("HomeModel는 fetchTransactions를 부르지 않아야 한다")
-        throw BankingError.server(statusCode: 0)
+        try transactions.withLock { $0 }.get()
     }
 
     func transfer(_ request: TransferRequest, idempotencyKey: String) async throws -> TransferReceipt {

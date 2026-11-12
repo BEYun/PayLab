@@ -85,6 +85,14 @@ struct AppIntegrationTests {
         #expect(mainBalance(home) == 1_249_000)
     }
 
+    @Test func historyLoadsAllTransactions() async {
+        let main = Account(id: "acc-main", name: "PayLab 통장", maskedNumber: "3333-01-****21", balance: 1_250_000)
+        let history = HistoryModel(account: main, repository: AppEnvironment.makeRepository(arguments: []))
+        await history.load()
+        #expect(history.loadFailed == false)
+        #expect(history.sections.map(\.rows.count).reduce(0, +) == FakeServer.transactionsPerAccount)
+    }
+
     private func mainBalance(_ home: HomeModel) -> Int? {
         home.accounts.first { $0.id == "acc-main" }?.balance
     }

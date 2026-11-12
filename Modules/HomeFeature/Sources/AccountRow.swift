@@ -4,6 +4,7 @@ import DesignSystem
 
 struct AccountRow: View {
     let account: Account
+    let onOpenHistory: (Account) -> Void
     let onTransfer: (Account) -> Void
 
     var body: some View {
@@ -19,7 +20,9 @@ struct AccountRow: View {
                     .font(PayFont.title)
                     .foregroundStyle(PayColor.textPrimary)
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { onOpenHistory(account) }
             Button { onTransfer(account) } label: {
                 Text("송금")
                     .font(PayFont.body)
