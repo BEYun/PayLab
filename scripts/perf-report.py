@@ -6,6 +6,7 @@
   1) .xctest 번들 밖 우선, 2) 경로가 얕은 것 우선, 3) 경로 문자열 사전순."""
 import argparse
 import collections
+import datetime
 import glob
 import json
 import os
@@ -23,7 +24,32 @@ HANG_RE = re.compile(r"^hang id=(\d+) duration=(\d+)ms frames=\d+$")
 HANG_FRAME_RE = re.compile(r"^hang frame id=(\d+) #\d+ (\S+) 0x([0-9a-f]+) base=0x([0-9a-f]+) (.*)$")
 SLOW_RE = re.compile(r"^(.+?):(\d+):\d+: warning: (.+?) took (\d+)ms to type-check \(limit: \d+ms\)")
 TIMING_RE = re.compile(r"^\s*(\S.*?) \(\d+ tasks?\) \| ([\d.]+) seconds")
+TIME_FORMATS = ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z")
+
+
+class CollectError(Exception):
+    """수집을 계속할 수 없는 입력 실패. main이 stderr에 알리고 종료 코드 2로 끝낸다."""
+
+
 ATOS_RE = re.compile(r"^(.*?) \(in .*?\)(?: \((.+):(\d+)\))?(?: \+ \d+)?$")
+
+
+def parse_time(text: str) -> datetime.datetime:
+    """오프셋이 있는 리포트 시각 -> aware datetime."""
+    for fmt in TIME_FORMATS:
+        try:
+            return datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    raise ValueError("시각을 읽을 수 없음: %r" % text)
+
+
+def parse_since(since: str) -> datetime.datetime:
+    """--since는 로컬 시각 -> aware datetime."""
+    try:
+        return datetime.datetime.strptime(since, "%Y-%m-%d %H:%M:%S").astimezone()
+    except ValueError:
+        raise CollectError('--since 형식 오류: "YYYY-MM-DD HH:MM:SS"여야 함: %r' % since)
 
 
 def make_frame(image: str, address: int, base: int, symbol: Optional[str],
@@ -117,36 +143,52 @@ def repo_relative(path: Optional[str], repo_root: str) -> Optional[str]:
     return os.path.relpath(path, root) if path.startswith(root + os.sep) else None
 
 
-def ensure_dwarf(binary: str, dsym_dir: str, run) -> Optional[str]:
+def run_checked(run, cmd: List[str], what: str, warnings: Optional[List[str]]):
+    """실행 실패(없는 명령·비 0 종료)는 warnings에 남기고 None."""
+    try:
+        result = run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        result = None
+        reason = str(e)
+    else:
+        reason = "exit %s" % result.returncode
+        if result.returncode == 0:
+            return result
+    if warnings is not None and what not in warnings:
+        warnings.append("%s 실패 (%s)" % (what, reason))
+    return None
+
+
+def ensure_dwarf(binary: str, dsym_dir: str, run, warnings: Optional[List[str]] = None) -> Optional[str]:
     name = os.path.basename(binary)
     dsym = os.path.join(dsym_dir, name + ".dSYM")
     dwarf = os.path.join(dsym, "Contents", "Resources", "DWARF", name)
     if os.path.exists(dwarf):
         return dwarf
-    result = run(["xcrun", "dsymutil", binary, "-o", dsym], capture_output=True, text=True)
-    return dwarf if result.returncode == 0 else None
+    result = run_checked(run, ["xcrun", "dsymutil", binary, "-o", dsym], "dsymutil " + name, warnings)
+    return dwarf if result else None
 
 
 def symbolize(frames: List[dict], products_dir: str, repo_root: str, run=subprocess.run,
-              dsym_dir: Optional[str] = None) -> List[dict]:
+              dsym_dir: Optional[str] = None, warnings: Optional[List[str]] = None) -> List[dict]:
     """frames는 스택 하나(첫 프레임 = pc). #1 이상은 복귀 주소라 address - 1을 조회한다."""
     out = [dict(f, file=repo_relative(f.get("file"), repo_root)) for f in frames]
     if dsym_dir is None:
         with tempfile.TemporaryDirectory() as tmp:
-            return symbolize(frames, products_dir, repo_root, run, tmp)
+            return symbolize(frames, products_dir, repo_root, run, tmp, warnings)
     groups = collections.OrderedDict()  # (image, base) -> [프레임 위치]
     for i, f in enumerate(frames):
         if f["image"] != "?":
             groups.setdefault((f["image"], f["base"]), []).append(i)
     for (image, base), positions in groups.items():
         binary = find_binary(products_dir, image)
-        dwarf = ensure_dwarf(binary, dsym_dir, run) if binary else None
+        dwarf = ensure_dwarf(binary, dsym_dir, run, warnings) if binary else None
         if not dwarf:
             continue
         addresses = [frames[i]["address"] - (1 if i > 0 else 0) for i in positions]
-        result = run(["xcrun", "atos", "-fullPath", "-o", dwarf, "-l", hex(base)] + [hex(a) for a in addresses],
-                     capture_output=True, text=True)
-        if result.returncode != 0:
+        result = run_checked(run, ["xcrun", "atos", "-fullPath", "-o", dwarf, "-l", hex(base)]
+                             + [hex(a) for a in addresses], "atos " + image, warnings)
+        if not result:
             continue
         for i, line in zip(positions, result.stdout.splitlines()):
             m = ATOS_RE.match(line.strip())
@@ -177,13 +219,18 @@ def git_output(run, repo_root: str, *args: str) -> str:
 
 def collect(since: str, device: str, products_dir: str, build_logs: List[str], repo_root: str,
             run=subprocess.run, crash_dir: Optional[str] = None) -> dict:
-    problems, ignored = [], 0
+    since_at = parse_since(since)
+    if not os.path.isdir(products_dir):
+        raise CollectError("--products 폴더가 없음: %s" % products_dir)
+    problems, ignored, warnings = [], 0, []
+    log = run(["xcrun", "simctl", "spawn", device, "log", "show", "--start", since, "--style", "ndjson",
+               "--info", "--debug", "--predicate", SUBSYSTEM_PREDICATE], capture_output=True, text=True)
+    if log.returncode != 0:
+        raise CollectError("log show 실패 (exit %s): %s" % (log.returncode, (log.stderr or "").strip()))
     with tempfile.TemporaryDirectory() as dsym_dir:
         def sym(frames):
-            return symbolize(frames, products_dir, repo_root, run, dsym_dir)
+            return symbolize(frames, products_dir, repo_root, run, dsym_dir, warnings)
 
-        log = run(["xcrun", "simctl", "spawn", device, "log", "show", "--start", since, "--style", "ndjson",
-                   "--info", "--debug", "--predicate", SUBSYSTEM_PREDICATE], capture_output=True, text=True)
         for hang in parse_hang_log(log.stdout.splitlines()):
             frames = sym(hang["frames"])
             files = frame_files(frames)
@@ -194,9 +241,17 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
                              "frames": frames, "files": files, "context": hang["context"]})
         pattern = os.path.join(crash_dir, "PayLab-*.ips") if crash_dir else os.path.expanduser(CRASH_GLOB)
         for path in sorted(glob.glob(pattern)):
-            with open(path) as f:
-                crash = parse_ips(f.read())
-            if crash["udid"] != device or (crash["time"] or "")[:19] < since:
+            try:
+                with open(path) as f:
+                    text = f.read()
+                header = json.loads(text[:text.index("\n")])  # 헤더 줄만으로 시각 필터. 본문은 큼
+                if parse_time(header["timestamp"]) < since_at:
+                    continue
+                crash = parse_ips(text)
+                if crash["udid"] != device or parse_time(crash["time"]) < since_at:
+                    continue
+            except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+                warnings.append("크래시 리포트 건너뜀 %s: %s %s" % (os.path.basename(path), type(e).__name__, e))
                 continue
             frames = sym(crash["frames"])
             problems.append({"kind": "crash", "exception": crash["exception"], "message": crash["message"],
@@ -216,7 +271,7 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
                                  "ms": slow["ms"], "files": [rel]})
     return {"version": 1, "commit": git_output(run, repo_root, "rev-parse", "HEAD"),
             "branch": git_output(run, repo_root, "branch", "--show-current"),
-            "problems": problems, "ignored_hangs": ignored, "timing": timing}
+            "problems": problems, "ignored_hangs": ignored, "timing": timing, "warnings": warnings}
 
 
 def main(argv: List[str]) -> int:
@@ -230,7 +285,13 @@ def main(argv: List[str]) -> int:
     c.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    report = collect(args.since, args.device, args.products, args.build_log, repo_root)
+    try:
+        report = collect(args.since, args.device, args.products, args.build_log, repo_root)
+    except CollectError as e:
+        print("perf-report collect 실패: %s" % e, file=sys.stderr)
+        return 2
+    for warning in report["warnings"]:
+        print("경고: %s" % warning, file=sys.stderr)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)

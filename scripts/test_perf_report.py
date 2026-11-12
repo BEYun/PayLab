@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """perf-report.py 테스트. 사용: python3 -I scripts/test_perf_report.py"""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 import tempfile
+import time
 import types
 import unittest
 
@@ -162,7 +165,14 @@ class SymbolizeTests(unittest.TestCase):
 
 
 class CollectTests(unittest.TestCase):
+    def set_tz(self, tz):
+        os.environ["TZ"] = tz
+        time.tzset()
+
     def setUp(self):
+        old = os.environ.get("TZ")
+        self.addCleanup(self.restore_tz, old)
+        self.set_tz("Asia/Seoul")  # --since는 로컬 시각. 기기 시간대와 무관하게 고정
         self.crash_dir = tempfile.mkdtemp()
         self.products = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.crash_dir)
@@ -171,14 +181,22 @@ class CollectTests(unittest.TestCase):
         shutil.copy(os.path.join(FIX, "crash-other-device.ips"),
                     os.path.join(self.crash_dir, "PayLab-2026-11-12-100600.ips"))
 
-    def collect(self, hang_lines="", since="2026-11-12 10:00:00", build_logs=()):
+    @staticmethod
+    def restore_tz(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    def collect(self, hang_lines="", since="2026-11-12 10:00:00", build_logs=(), tool=None):
         def run(cmd, **kw):
             if "log" in cmd and "show" in cmd:
                 self.log_cmd = cmd
                 return ok(hang_lines)
             if cmd[:1] == ["git"]:
                 return ok("abc123\n")
-            return ok()
+            return tool(cmd) if tool else ok()
         return pr.collect(since, DEVICE, self.products, list(build_logs), REPO, run=run, crash_dir=self.crash_dir)
 
     def test_collect_ignores_other_device_crash(self):
@@ -211,6 +229,118 @@ class CollectTests(unittest.TestCase):
             "file": "Modules/HomeFeature/Sources/HistoryModel.swift",
             "files": ["Modules/HomeFeature/Sources/HistoryModel.swift"]}])
         self.assertEqual(report["timing"], {"SwiftCompile": 2.5})
+
+    def add_binary(self, rel):
+        path = os.path.join(self.products, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+
+    def rewrite_crash(self, name, captured, header):
+        path = os.path.join(self.crash_dir, name)
+        with open(path) as f:
+            text = f.read()
+        text = text.replace("2026-11-12 10:05:00.1234 +0900", captured).replace("2026-11-12 10:05:00.00 +0900", header)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def test_collect_compares_crash_time_with_offset(self):
+        # 10:05 +0900 == 2026-11-11 17:05 -0800 (같은 순간). 벽시계만 비교하면 since보다 이르다고 오판한다
+        self.rewrite_crash("PayLab-2026-11-12-100500.ips", "2026-11-11 17:05:00.1234 -0800",
+                           "2026-11-11 17:05:00.00 -0800")
+        self.assertEqual([p["kind"] for p in self.collect(since="2026-11-12 10:00:00")["problems"]], ["crash"])
+        self.assertEqual(self.collect(since="2026-11-12 10:05:01")["problems"], [])
+        self.set_tz("UTC")  # since는 UTC 10:00 = 19:00 +0900. 크래시(10:05 +0900)는 그 전이다
+        self.assertEqual(self.collect(since="2026-11-12 10:00:00")["problems"], [])
+
+    def test_hang_with_repo_frame_is_a_problem_with_files_and_context(self):
+        self.add_binary("HomeFeature.framework/HomeFeature")
+        lines = "\n".join([hang_event("load start", pid=7, category="history"),
+                           hang_event("hang id=1 duration=412ms frames=2", pid=7),
+                           hang_event("hang frame id=1 #0 HomeFeature 0x1000 base=0x800 f", pid=7),
+                           hang_event("hang frame id=1 #1 HomeFeature 0x2000 base=0x800 g", pid=7)])
+
+        def tool(cmd):
+            if "atos" in cmd:
+                return ok("f() (in HomeFeature) (%s/Modules/HomeFeature/Sources/HistoryModel.swift:42)\n"
+                          "g() (in HomeFeature) (/Elsewhere/Other.swift:3)\n" % REPO)
+            return ok()
+        report = self.collect(hang_lines=lines, since="2026-11-12 11:00:00", tool=tool)
+        self.assertEqual(report["ignored_hangs"], 0)
+        self.assertEqual(report["warnings"], [])
+        problem = report["problems"][0]
+        self.assertEqual((problem["kind"], problem["duration_ms"]), ("hang", 412))
+        self.assertEqual(problem["files"], ["Modules/HomeFeature/Sources/HistoryModel.swift"])
+        self.assertEqual(problem["context"], ["load start"])
+
+    def test_crash_goes_through_symbolize(self):
+        self.add_binary("PayLab.app/PayLab.debug.dylib")
+        atos_cmds = []
+
+        def tool(cmd):
+            if "atos" in cmd:
+                atos_cmds.append(cmd)
+                return ok("PayLabModel.load() (in PayLab.debug.dylib) (%s/Modules/App/Sources/Model.swift:9)\n" % REPO)
+            return ok()
+        crash = self.collect(tool=tool)["problems"][0]
+        self.assertEqual(crash["files"], ["Modules/App/Sources/Model.swift"])
+        self.assertEqual(crash["frames"][1]["function"], "PayLabModel.load()")
+        self.assertEqual(atos_cmds[0][-1], hex(4347117568 + 18904 - 1))  # 크래시 프레임 #1은 복귀 주소
+
+    def test_atos_failure_becomes_warning_not_ignored_hang_silence(self):
+        self.add_binary("HomeFeature.framework/HomeFeature")
+        lines = "\n".join([hang_event("hang id=1 duration=412ms frames=1"),
+                           hang_event("hang frame id=1 #0 HomeFeature 0x1000 base=0x800 f")])
+
+        def tool(cmd):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom") if "atos" in cmd else ok()
+        report = self.collect(hang_lines=lines, since="2026-11-12 11:00:00", tool=tool)
+        self.assertEqual(report["problems"], [])
+        self.assertTrue(any("atos HomeFeature" in w for w in report["warnings"]), report["warnings"])
+
+    def test_dsymutil_missing_becomes_warning(self):
+        self.add_binary("HomeFeature.framework/HomeFeature")
+        lines = "\n".join([hang_event("hang id=1 duration=412ms frames=1"),
+                           hang_event("hang frame id=1 #0 HomeFeature 0x1000 base=0x800 f")])
+
+        def tool(cmd):
+            raise FileNotFoundError("xcrun")
+        report = self.collect(hang_lines=lines, since="2026-11-12 11:00:00", tool=tool)
+        self.assertTrue(any("dsymutil HomeFeature" in w for w in report["warnings"]), report["warnings"])
+
+    def test_log_show_failure_raises(self):
+        def run(cmd, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="Unable to find device")
+        with self.assertRaises(pr.CollectError):
+            pr.collect("2026-11-12 10:00:00", DEVICE, self.products, [], REPO, run=run, crash_dir=self.crash_dir)
+
+    def test_missing_products_dir_raises(self):
+        with self.assertRaises(pr.CollectError):
+            pr.collect("2026-11-12 10:00:00", DEVICE, os.path.join(self.products, "nope"), [], REPO,
+                       run=lambda cmd, **kw: ok(), crash_dir=self.crash_dir)
+
+    def test_main_exits_2_and_writes_nothing_on_collect_error(self):
+        out = os.path.join(self.products, "report.json")
+
+        def boom(*a, **kw):
+            raise pr.CollectError("x")
+        original, pr.collect = pr.collect, boom
+        self.addCleanup(setattr, pr, "collect", original)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = pr.main(["collect", "--since", "2026-11-12 10:00:00", "--device", DEVICE,
+                            "--products", self.products, "--out", out])
+        self.assertIn("실패", err.getvalue())
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(out))
+
+    def test_unparsable_ips_is_skipped_with_warning(self):
+        with open(os.path.join(self.crash_dir, "PayLab-broken.ips"), "w") as f:
+            f.write('{"timestamp": "2026-11-12 10:07:00.00 +0900"')  # 쓰다 만 파일
+        with open(os.path.join(self.crash_dir, "PayLab-nocrash.ips"), "w") as f:
+            f.write('{"timestamp": "2026-11-12 10:07:00.00 +0900"}\n{"procPath": "x"}\n')  # 크래시 아님
+        report = self.collect()
+        self.assertEqual([p["kind"] for p in report["problems"]], ["crash"])  # 정상 리포트는 살아남는다
+        self.assertEqual(len(report["warnings"]), 2)
 
 
 if __name__ == "__main__":
