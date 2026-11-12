@@ -10,6 +10,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "perf")
@@ -341,6 +342,303 @@ class CollectTests(unittest.TestCase):
         report = self.collect()
         self.assertEqual([p["kind"] for p in report["problems"]], ["crash"])  # 정상 리포트는 살아남는다
         self.assertEqual(len(report["warnings"]), 2)
+
+
+SRC = "Modules/HomeFeature/Sources/HistoryModel.swift"
+
+
+def hang_problem(files=(SRC,), line=12, ms=412, fn="HistoryModel.load()"):
+    return {"kind": "hang", "duration_ms": ms, "time": "t", "files": list(files), "context": ["load start"],
+            "frames": [frame(function="static PayLabApp.$main()", file="Modules/App/Sources/PayLabApp.swift"),
+                       frame(function=fn, file=SRC, line=line)]}
+
+
+def slow_problem(name="instance method 'x()'", line=10, ms=150, file=SRC):
+    return {"kind": "slow-function", "name": name, "file": file, "line": line, "ms": ms, "files": [file]}
+
+
+def crash_problem(files=(SRC,)):
+    return {"kind": "crash", "exception": "EXC_BREAKPOINT", "message": "Fatal error: x", "time": "t",
+            "files": list(files), "context": [],
+            "frames": [frame(function="HistoryModel.load()", file=SRC, line=3)]}
+
+
+def report_data(*problems, warnings=()):
+    return {"version": 1, "commit": "abc1234", "branch": "feature/x", "problems": list(problems),
+            "timing": {}, "ignored_hangs": 0, "warnings": list(warnings)}
+
+
+def metric(seconds, ratio=None):
+    return {"swift_compile_s": seconds, "system_modules_s": 10.0, "ratio": ratio}
+
+
+class FakeGitHub:
+    def __init__(self, issues=()):
+        self.existing = list(issues)
+        self.labels, self.created, self.edited, self.comments = 0, [], [], []
+
+    def ensure_labels(self):
+        self.labels += 1
+
+    def issues(self):
+        return self.existing
+
+    def create_issue(self, title, body, labels):
+        self.created.append((title, body, labels))
+        return "https://example.invalid/1"
+
+    def edit_issue_body(self, number, body):
+        self.edited.append((number, body))
+
+    def upsert_pr_comment(self, pr, body, only_if_exists=False):
+        self.comments.append((pr, body, only_if_exists))
+        return True
+
+
+FOUND = {"where": "로컬", "branch": "feature/x", "commit": "abc1234", "run_url": "", "time": "2026-11-12 10:00:00"}
+
+
+class ReportTests(unittest.TestCase):
+    def setUp(self):
+        self.out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.out, True)
+
+    def run_report(self, data, where, changed=(), gh=None, **kw):
+        gh = gh if gh is not None else FakeGitHub()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = pr.report(data, where, set(changed), gh, out_dir=self.out, env={}, **kw)
+        return code, buf.getvalue(), gh
+
+    def open_issue(self, problem, number=7, state="OPEN"):
+        return {"number": number, "state": state, "title": pr.issue_title(problem),
+                "body": pr.issue_body(problem, FOUND)}
+
+    def test_classify_change_when_any_frame_file_changed(self):
+        p = {"files": ["a.swift", "b.swift"]}
+        self.assertEqual(pr.classify(p, {"b.swift", "z.swift"}), "change")
+
+    def test_classify_existing_when_no_overlap(self):
+        self.assertEqual(pr.classify({"files": ["a.swift"]}, {"b.swift"}), "existing")
+        self.assertEqual(pr.classify({"files": []}, {"b.swift"}), "existing")
+
+    def test_signature_ignores_line_number(self):
+        self.assertEqual(pr.signature(hang_problem(line=12)), pr.signature(hang_problem(line=30)))
+        self.assertEqual(pr.signature(hang_problem()), "hang|HistoryModel.load()")
+        self.assertEqual(pr.signature(slow_problem(line=1)), pr.signature(slow_problem(line=99)))
+        self.assertEqual(pr.signature(crash_problem()), "crash|EXC_BREAKPOINT|HistoryModel.load()")
+        self.assertEqual(pr.signature(dict(crash_problem(), frames=[])), "crash|EXC_BREAKPOINT|-")
+        self.assertEqual(pr.signature({"kind": "build-time"}), "build-time")
+
+    def test_titles(self):
+        self.assertEqual(pr.issue_title(hang_problem()), "[hang] HistoryModel.load() 412ms")
+        self.assertEqual(pr.issue_title(crash_problem()), "[crash] EXC_BREAKPOINT HistoryModel.load()")
+        self.assertEqual(pr.issue_title(slow_problem()), "[slow-build] HistoryModel.swift instance method 'x()' 150ms")
+        self.assertEqual(pr.issue_title({"kind": "build-time", "increase_pct": 35.2, "increase_s": 14.4}),
+                         "[slow-build] 우리 코드 컴파일 시간 +35% (+14초)")
+
+    def test_sanitize_removes_machine_info(self):
+        udid = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        text = ("/Users/tester/PayLab/Modules/X.swift /Users/tester/Library/Logs /Users/other/secret.txt "
+                "/Users/runner/work/PayLab/PayLab/Modules/Y.swift %s me@example.com ghp_%s sk-%s Yuns-Mac" %
+                (udid, "a" * 36, "b" * 30))
+        with mock.patch.dict(os.environ, {"HOME": "/Users/tester"}), \
+                mock.patch.object(pr.socket, "gethostname", lambda: "Yuns-Mac"):
+            out = pr.sanitize(text, "/Users/tester/PayLab")
+        self.assertEqual(out, "Modules/X.swift ~/Library/Logs ~/secret.txt Modules/Y.swift <UDID> <email> "
+                              "<token> <token> <host>")
+
+    def test_local_change_blocks_without_issue(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "local", changed={SRC})
+        self.assertEqual(code, 1)
+        self.assertEqual(gh.created, [])
+        self.assertIn("[이번 변경] [hang] HistoryModel.load() 412ms %s:12" % SRC, out)
+
+    def test_local_existing_creates_issue_with_labels(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "local")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(gh.created), 1)
+        title, body, labels = gh.created[0]
+        self.assertEqual(labels, ["perf-auto", "hang"])
+        self.assertIn("<!-- perf-signature: hang|HistoryModel.load() -->", body)
+        self.assertNotIn("/Users/", body)
+        self.assertEqual(gh.labels, 1)
+
+    def test_existing_open_issue_records_occurrence(self):
+        gh = FakeGitHub([self.open_issue(hang_problem())])
+        code, out, gh = self.run_report(report_data(hang_problem()), "local", gh=gh)
+        self.assertEqual(gh.created, [])
+        self.assertEqual(len(gh.edited), 1)
+        number, body = gh.edited[0]
+        self.assertEqual(number, 7)
+        self.assertIn("횟수: 2", body)
+        self.assertIn("[기존 → 이슈 #7]", out)
+
+    def test_record_occurrence_without_markers_appends_block(self):
+        body = pr.record_occurrence("손으로 쓴 본문", FOUND)
+        self.assertTrue(body.startswith("손으로 쓴 본문"))
+        self.assertIn("<!-- perf-occurrences:start -->", body)
+        self.assertIn("횟수: 1", body)
+        self.assertEqual(body.count("perf-occurrences:end"), 1)
+
+    def test_record_occurrence_keeps_last_five(self):
+        body = pr.issue_body(hang_problem(), FOUND)
+        for i in range(6):
+            body = pr.record_occurrence(body, dict(FOUND, commit="c%d" % i, time="T%d" % i))
+        self.assertIn("횟수: 7", body)
+        self.assertIn("마지막 발견: T5", body)
+        block = body[body.index("perf-occurrences:start"):]
+        self.assertEqual(block.count("\n  - "), 5)
+        self.assertIn("c5", block)
+        self.assertNotIn("abc1234", block)
+
+    def test_local_closed_only_does_not_create(self):
+        gh = FakeGitHub([self.open_issue(hang_problem(), state="CLOSED")])
+        code, out, gh = self.run_report(report_data(hang_problem()), "local", gh=gh)
+        self.assertEqual((gh.created, gh.edited), ([], []))
+        self.assertIn("#7", out)
+
+    def test_ci_closed_only_creates_with_link(self):
+        gh = FakeGitHub([self.open_issue(hang_problem(), number=5, state="CLOSED")])
+        code, out, gh = self.run_report(report_data(hang_problem()), "main", gh=gh)
+        self.assertEqual(len(gh.created), 1)
+        self.assertIn("#5", gh.created[0][1])
+
+    def test_local_ignores_existing_slow_function(self):
+        code, out, gh = self.run_report(report_data(slow_problem()), "local")
+        self.assertEqual((code, gh.created), (0, []))
+        self.assertIn("성능 문제 없음", out)
+
+    def test_pr_change_upserts_comment(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "pr", changed={SRC}, pr=12)
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.created, [])
+        self.assertEqual(len(gh.comments), 1)
+        number, body, only = gh.comments[0]
+        self.assertEqual((number, only), (12, False))
+        self.assertIn("<!-- paylab-perf-report -->", body)
+        self.assertIn("HistoryModel.load()", body)
+
+    def test_pr_without_problems_only_edits_existing_comment(self):
+        code, out, gh = self.run_report(report_data(), "pr", pr=12)
+        self.assertEqual(len(gh.comments), 1)
+        self.assertTrue(gh.comments[0][2])
+        self.assertIn("문제 없음", gh.comments[0][1])
+        self.assertIn("성능 문제 없음", out)
+
+    def test_pr_existing_creates_issue(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "pr", changed={"other.swift"}, pr=12)
+        self.assertEqual(len(gh.created), 1)
+        self.assertTrue(gh.comments[0][2])  # 변경 문제 없음 -> 기존 코멘트만 고침
+
+    def test_main_treats_all_as_existing(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "main", changed={SRC})
+        self.assertEqual(len(gh.created), 1)
+        self.assertEqual(gh.comments, [])
+        self.assertNotIn("[이번 변경]", out)
+
+    def test_duplicate_signatures_merge_into_one_issue(self):
+        data = report_data(hang_problem(ms=300), hang_problem(ms=900, line=40))
+        code, out, gh = self.run_report(data, "main")
+        self.assertEqual(len(gh.created), 1)
+        self.assertIn("900ms", gh.created[0][0])
+
+    def test_warnings_are_printed(self):
+        code, out, gh = self.run_report(report_data(warnings=["atos 실패"]), "local")
+        self.assertIn("경고: atos 실패", out)
+
+    def test_dry_run_never_calls_github(self):
+        class Boom:
+            def __getattr__(self, name):
+                raise AssertionError("gh 호출: " + name)
+        code, out, _ = self.run_report(report_data(hang_problem()), "main", gh=Boom(), dry_run=True)
+        self.assertEqual(code, 0)
+        self.assertIn("dry-run", out)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "pending-issues.json")))
+
+    def test_local_gh_failure_does_not_block(self):
+        def boom(*a, **kw):
+            raise OSError("gh 없음")
+        code, out, _ = self.run_report(report_data(hang_problem()), "local", gh=pr.GitHub(run=boom))
+        self.assertEqual(code, 0)
+        with open(os.path.join(self.out, "pending-issues.json")) as f:
+            pending = json.load(f)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["labels"], ["perf-auto", "hang"])
+        self.assertIn("경고", out)
+
+    def test_build_regression_in_pr_is_change(self):
+        code, out, gh = self.run_report(report_data(), "pr", pr=3, baseline=[metric(100.0)] * 5, metrics=metric(135.0))
+        self.assertIn("[이번 변경] [slow-build] 우리 코드 컴파일 시간 +35% (+35초)", out)
+        self.assertEqual(gh.created, [])
+
+    def test_build_regression_thresholds(self):
+        base = [metric(100.0)] * 5
+        self.assertIsNone(pr.build_regression(metric(150.0), base[:4]))  # 기준 4개
+        self.assertIsNone(pr.build_regression(metric(129.0), base))  # +29%
+        self.assertIsNone(pr.build_regression(metric(15.0), [metric(10.0)] * 5))  # +50%, +5초
+        found = pr.build_regression(metric(131.0), base)  # +31%, +31초
+        self.assertEqual(found["kind"], "build-time")
+        self.assertEqual(found["files"], [])
+        self.assertAlmostEqual(found["increase_pct"], 31.0)
+        self.assertAlmostEqual(found["increase_s"], 31.0)
+        self.assertIsNotNone(pr.build_regression(metric(42.0), [metric(30.0)] * 5))  # +40%, +12초
+
+    def test_build_regression_uses_ratio_when_all_present(self):
+        base = [metric(100.0, 2.0)] * 5
+        self.assertIsNone(pr.build_regression(metric(160.0, 1.6), base))  # 초는 +60%지만 ratio는 -20%
+        self.assertIsNotNone(pr.build_regression(metric(160.0, 3.0), base))  # ratio +50%, +60초
+        self.assertIsNone(pr.build_regression(metric(112.0, None), base))  # ratio 없음 -> 초 +12%
+
+    def test_report_missing_input_exits_zero(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = pr.main(["report", "--input", os.path.join(self.out, "none.json"), "--where", "local",
+                            "--no-changes", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("보고서 없음", out.getvalue())
+
+    def test_changed_files_modes(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd[3:])
+            return ok({"merge-base": "base1\n", "diff": "a.swift\nb.swift\n", "ls-files": "new.swift\n"}[cmd[3]])
+        self.assertEqual(pr.changed_files("/r", "merge-base", run=fake), {"a.swift", "b.swift", "new.swift"})
+        self.assertIn(["diff", "--name-only", "base1"], calls)
+        calls.clear()
+        self.assertEqual(pr.changed_files("/r", "ref", ref="origin/main", run=fake), {"a.swift", "b.swift"})
+        self.assertEqual(calls, [["diff", "--name-only", "origin/main", "HEAD"]])
+        self.assertEqual(pr.changed_files("/r", "none", run=fake), set())
+
+
+class GitHubTests(unittest.TestCase):
+    def test_upsert_pr_comment_edits_marked_comment(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            if "PATCH" not in cmd:
+                return ok(json.dumps([{"id": 1, "body": "other"}, {"id": 9, "body": "x <!-- paylab-perf-report -->"}]))
+            return ok()
+        self.assertTrue(pr.GitHub(run=fake).upsert_pr_comment(3, "new <!-- paylab-perf-report -->"))
+        self.assertIn("PATCH", calls[-1])
+        self.assertTrue(any("comments/9" in part for part in calls[-1]))
+
+    def test_upsert_pr_comment_only_if_exists_skips_when_missing(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return ok("[]")
+        self.assertFalse(pr.GitHub(run=fake).upsert_pr_comment(3, "x", only_if_exists=True))
+        self.assertEqual(len(calls), 1)
+
+    def test_nonzero_exit_raises(self):
+        def fake(cmd, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="auth")
+        with self.assertRaises(pr.GitHubError):
+            pr.GitHub(run=fake).issues()
 
 
 if __name__ == "__main__":

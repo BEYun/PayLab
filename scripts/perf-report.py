@@ -2,6 +2,9 @@
 """성능 이상 수집: hang 로그, 크래시 리포트, 느린 타입 체크 경고를 모아 기호화한 보고서 JSON을 쓴다.
 사용: python3 -I scripts/perf-report.py collect --since "<YYYY-MM-DD HH:MM:SS>" --device <UDID>
           --products <제품 폴더> [--build-log <경로>]... --out <경로>
+     python3 -I scripts/perf-report.py report --input <json> --where local|pr|main [--changed-from <ref> | --no-changes]
+          [--pr <n>] [--baseline-dir <dir>] [--metrics <json>] [--dry-run]
+     python3 -I scripts/perf-report.py changed-swift
 바이너리 선택 규칙(find_binary): 제품 폴더 아래에서 파일 이름이 이미지 이름과 같은 일반 파일 중
   1) .xctest 번들 밖 우선, 2) 경로가 얕은 것 우선, 3) 경로 문자열 사전순."""
 import argparse
@@ -11,10 +14,11 @@ import glob
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
 
 ENTRY_POINTS = {"main", "$main", "static PayLabApp.$main()", "__debug_main_executable_dylib_entry_point"}
 CRASH_GLOB = "~/Library/Logs/DiagnosticReports/PayLab-*.ips"
@@ -274,6 +278,394 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
             "problems": problems, "ignored_hangs": ignored, "timing": timing, "warnings": warnings}
 
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNNER_ROOT = "/Users/runner/work/PayLab/PayLab/"
+PR_MARKER = "<!-- paylab-perf-report -->"
+OCC_START, OCC_END = "<!-- perf-occurrences:start -->", "<!-- perf-occurrences:end -->"
+SIGNATURE_RE = re.compile(r"<!-- perf-signature: (.*?) -->")
+LABELS = {"perf-auto": "ededed", "crash": "b60205", "hang": "d93f0b", "slow-build": "fbca04"}
+KIND_LABEL = {"crash": "crash", "hang": "hang", "slow-function": "slow-build", "build-time": "slow-build"}
+MAX_RECENT = 5
+
+
+class GitHubError(Exception):
+    """gh 호출 실패(비 0 종료)."""
+
+
+def changed_files(repo_root: str, mode: str, ref: Optional[str] = None, run=subprocess.run) -> Set[str]:
+    def git(*args: str) -> List[str]:
+        result = run(["git", "-C", repo_root] + list(args), capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError("git %s 실패 (exit %s)" % (args[0], result.returncode))
+        return [line for line in result.stdout.splitlines() if line]
+
+    if mode == "none":
+        return set()
+    if mode == "ref":
+        return set(git("diff", "--name-only", ref, "HEAD"))
+    try:
+        base = git("merge-base", "origin/main", "HEAD")[0]
+    except (RuntimeError, IndexError):
+        base = "HEAD"  # origin/main이 없으면 스테이징·미스테이징 변경만 본다
+    return set(git("diff", "--name-only", base)) | set(git("ls-files", "--others", "--exclude-standard"))
+
+
+def classify(problem: dict, changed: Set[str]) -> str:
+    return "change" if set(problem.get("files", [])) & set(changed) else "existing"
+
+
+def innermost_function(problem: dict) -> Optional[str]:
+    for f in problem.get("frames", []):
+        if is_our_frame(f):
+            return f.get("function") or f.get("symbol") or "?"
+    return None
+
+
+def signature(problem: dict) -> str:
+    kind = problem["kind"]
+    if kind == "hang":
+        return "hang|%s" % innermost_function(problem)
+    if kind == "crash":
+        return "crash|%s|%s" % (problem.get("exception"), innermost_function(problem) or "-")
+    if kind == "slow-function":
+        return "slow-function|%s|%s" % (problem["file"], problem["name"])
+    return "build-time"
+
+
+def sanitize(text: str, repo_root: str) -> str:
+    text = text.replace(os.path.normpath(repo_root) + "/", "").replace(RUNNER_ROOT, "")
+    home = os.path.expanduser("~")
+    if home not in ("", "/"):
+        text = text.replace(home, "~")
+    text = re.sub(r"/Users/[^/\s]+/", "~/", text)
+    text = re.sub(r"\b[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\b", "<UDID>", text)
+    text = re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "<email>", text)
+    text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,})", "<token>", text)
+    host = socket.gethostname()
+    for name in {host, host.split(".")[0]}:
+        if len(name) >= 4:
+            text = text.replace(name, "<host>")
+    return text
+
+
+def issue_title(problem: dict) -> str:
+    kind = problem["kind"]
+    if kind == "hang":
+        return "[hang] %s %dms" % (innermost_function(problem), problem["duration_ms"])
+    if kind == "crash":
+        return "[crash] %s" % " ".join(x for x in (problem.get("exception"), innermost_function(problem)) if x)
+    if kind == "slow-function":
+        return "[slow-build] %s %s %dms" % (os.path.basename(problem["file"]), problem["name"], problem["ms"])
+    return "[slow-build] 우리 코드 컴파일 시간 +%d%% (+%d초)" % (round(problem["increase_pct"]), round(problem["increase_s"]))
+
+
+def location(problem: dict) -> str:
+    """`파일:줄`. 위치가 없으면 빈 문자열."""
+    if problem["kind"] == "slow-function":
+        return "%s:%d" % (problem["file"], problem["line"])
+    for f in problem.get("frames", []):
+        if is_our_frame(f):
+            return "%s:%s" % (f["file"], f["line"]) if f.get("line") else f["file"]
+    return ""
+
+
+def found_line(found: dict) -> str:
+    return " · ".join(x for x in (found["where"], found["branch"], found["commit"]) if x)
+
+
+def occurrence_block(count: int, found: dict, recent: List[str]) -> str:
+    lines = [OCC_START, "## 발생 기록", "- 횟수: %d" % count, "- 마지막 발견: %s" % found["time"], "- 최근 발견한 곳:"]
+    lines += ["  - %s" % entry for entry in recent[:MAX_RECENT]]
+    lines.append(OCC_END)
+    return "\n".join(lines)
+
+
+def issue_body(problem: dict, found: dict, previous: Optional[int] = None) -> str:
+    kind = problem["kind"]
+    if kind == "hang":
+        figure = "메인 스레드 %dms 응답 없음 (기준 250ms)" % problem["duration_ms"]
+    elif kind == "crash":
+        figure = "크래시 %s" % problem.get("exception")
+    elif kind == "slow-function":
+        figure = "타입 검사 %dms (기준 100ms) — %s" % (problem["ms"], problem["name"])
+    else:
+        figure = "우리 코드 컴파일 시간 +%.0f%% (+%.1f초). 현재 %.1f초, 최근 중앙값 %.1f초" % (
+            problem["increase_pct"], problem["increase_s"], problem["current"], problem["median"])
+    parts = ["## 종류와 수치", "- 종류: %s" % kind, "- 수치: %s" % figure,
+             "## 처음 발견한 곳", "- 위치: %s" % found["where"], "- 브랜치: %s" % found["branch"],
+             "- 커밋: %s" % found["commit"]]
+    if found.get("run_url"):
+        parts.append("- 실행: %s" % found["run_url"])
+    if previous:
+        parts.append("- 이전 이슈: #%d (닫힌 뒤 다시 발생)" % previous)
+    if problem.get("context"):
+        parts += ["## 재현 단서 (직전 앱 로그)", "```", *problem["context"], "```"]
+    stack = [f for f in problem.get("frames", []) if is_our_frame(f)]
+    if stack:
+        parts.append("## 우리 코드 스택")
+        for f in stack:
+            where = "%s:%s" % (f["file"], f["line"]) if f.get("line") else f["file"]
+            parts.append("- %s — %s" % (f.get("function") or f.get("symbol") or "?", where))
+    if problem.get("message"):
+        parts += ["## 원문", "```", problem["message"], "```"]
+    parts += ["<!-- perf-signature: %s -->" % signature(problem), occurrence_block(1, found, [found_line(found)])]
+    return "\n".join(parts)
+
+
+def record_occurrence(body: str, found: dict) -> str:
+    start, end = body.find(OCC_START), body.find(OCC_END)
+    count, recent = 0, []
+    if start >= 0 and end > start:
+        block = body[start:end]
+        m = re.search(r"횟수: (\d+)", block)
+        count = int(m.group(1)) if m else 0
+        recent = re.findall(r"^  - (.*)$", block, re.M)
+        head, tail = body[:start], body[end + len(OCC_END):]
+    else:
+        head, tail = body.rstrip("\n") + "\n", ""
+    new = occurrence_block(count + 1, found, [found_line(found)] + recent)
+    return head + new + tail
+
+
+def median(values: List[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def build_regression(current: dict, baseline: List[dict], ratio: float = 0.30,
+                     min_seconds: float = 10.0) -> Optional[dict]:
+    if len(baseline) < 5:
+        return None
+    use_ratio = all(m.get("ratio") is not None for m in baseline + [current])
+    key = "ratio" if use_ratio else "swift_compile_s"
+    base_value = median([m[key] for m in baseline])
+    base_seconds = median([m["swift_compile_s"] for m in baseline])
+    if base_value <= 0:
+        return None
+    pct = (current[key] / base_value - 1) * 100
+    seconds = current["swift_compile_s"] - base_seconds
+    if pct < ratio * 100 or seconds < min_seconds:
+        return None
+    return {"kind": "build-time", "files": [], "increase_pct": pct, "increase_s": seconds,
+            "current": current["swift_compile_s"], "median": base_seconds}
+
+
+class GitHub:
+    def __init__(self, run=subprocess.run):
+        self.run = run
+
+    def gh(self, *args: str) -> str:
+        result = self.run(["gh"] + list(args), capture_output=True, text=True)
+        if result.returncode != 0:
+            raise GitHubError("gh %s 실패 (exit %s): %s" % (args[0], result.returncode, (result.stderr or "").strip()))
+        return result.stdout
+
+    def ensure_labels(self) -> None:
+        have = {label["name"] for label in json.loads(self.gh("label", "list", "--json", "name", "--limit", "200"))}
+        for name, color in LABELS.items():
+            if name not in have:
+                self.gh("label", "create", name, "--color", color)
+
+    def issues(self) -> List[dict]:
+        return json.loads(self.gh("issue", "list", "--label", "perf-auto", "--state", "all", "--limit", "200",
+                                  "--json", "number,state,title,body"))
+
+    def create_issue(self, title: str, body: str, labels: List[str]) -> str:
+        args = ["issue", "create", "--title", title, "--body", body]
+        for label in labels:
+            args += ["--label", label]
+        return self.gh(*args).strip()
+
+    def edit_issue_body(self, number: int, body: str) -> None:
+        self.gh("issue", "edit", str(number), "--body", body)
+
+    def upsert_pr_comment(self, pr: int, body: str, only_if_exists: bool = False) -> bool:
+        comments = json.loads(self.gh("api", "repos/{owner}/{repo}/issues/%d/comments?per_page=100" % pr))
+        existing = next((c for c in comments if PR_MARKER in c.get("body", "")), None)
+        if existing:
+            self.gh("api", "-X", "PATCH", "repos/{owner}/{repo}/issues/comments/%d" % existing["id"], "-f", "body=" + body)
+            return True
+        if only_if_exists:
+            return False
+        self.gh("pr", "comment", str(pr), "--body", body)
+        return True
+
+
+def merge_duplicates(problems: List[dict]) -> List[dict]:
+    """서명이 같은 문제는 하나로 합친다(위치 파일은 합집합, hang은 가장 긴 지속 시간)."""
+    merged = collections.OrderedDict()
+    for p in problems:
+        sig = signature(p)
+        if sig not in merged:
+            merged[sig] = dict(p, files=list(p.get("files", [])))
+            continue
+        kept = merged[sig]
+        kept["files"] += [f for f in p.get("files", []) if f not in kept["files"]]
+        if p["kind"] == "hang" and p["duration_ms"] > kept["duration_ms"]:
+            merged[sig] = dict(p, files=kept["files"])
+    return list(merged.values())
+
+
+def make_found(data: dict, where: str, env) -> dict:
+    ci = where != "local"
+    run_url = ""
+    if ci and all(env.get(k) for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")):
+        run_url = "%s/%s/actions/runs/%s" % (env["GITHUB_SERVER_URL"], env["GITHUB_REPOSITORY"], env["GITHUB_RUN_ID"])
+    return {"where": "CI" if ci else "로컬", "branch": data.get("branch", "unknown"),
+            "commit": data.get("commit", "unknown"), "run_url": run_url,
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def pr_comment_body(changes: List[dict], found: dict) -> str:
+    if not changes:
+        return "%s\n## 성능 리포트\n문제 없음 (%s)" % (PR_MARKER, found["commit"])
+    lines = [PR_MARKER, "## 성능 리포트", "이번 변경과 엮인 문제 %d개 (%s)" % (len(changes), found["commit"])]
+    for p in changes:
+        lines.append("- %s %s" % (issue_title(p), location(p)))
+    return "\n".join(lines)
+
+
+def report(data: dict, where: str, changed: Set[str], github, pr: Optional[int] = None,
+           baseline: Optional[List[dict]] = None, metrics: Optional[dict] = None, dry_run: bool = False,
+           out_dir: str = ".build/perf", env=None, repo_root: str = REPO_ROOT) -> int:
+    env = os.environ if env is None else env
+    clean = lambda text: sanitize(text, repo_root)
+    for warning in data.get("warnings", []):
+        print("경고: %s" % warning)
+    found = make_found(data, where, env)
+    problems = merge_duplicates(data.get("problems", []))
+    if metrics is not None and where != "local":
+        regression = build_regression(metrics, baseline or [])
+        if regression:
+            problems.append(regression)
+    changes, existing = [], []
+    for p in problems:
+        if where == "main":
+            existing.append(p)
+        elif p["kind"] == "build-time":
+            (changes if where == "pr" else existing).append(p)
+        else:
+            (changes if classify(p, changed) == "change" else existing).append(p)
+    if where == "local":
+        existing = [p for p in existing if p["kind"] != "slow-function"]  # 로컬은 느린 함수의 기존 문제를 무시
+    for p in changes:
+        print(clean(("[이번 변경] %s %s" % (issue_title(p), location(p))).rstrip()))
+    if where == "pr" and pr is not None:
+        comment = clean(pr_comment_body(changes, found))
+        if dry_run:
+            print("[dry-run] PR #%d 코멘트%s" % (pr, "" if changes else " (기존 코멘트가 있을 때만)"))
+        else:
+            try:
+                github.upsert_pr_comment(pr, comment, only_if_exists=not changes)
+            except Exception as e:
+                print("경고: PR 코멘트 실패: %s" % clean(str(e)))
+    pending = handle_existing(existing, where, found, github, dry_run, clean)
+    if not changes and not existing:
+        print("성능 문제 없음")
+    if pending:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "pending-issues.json")
+        with open(path, "w") as f:
+            json.dump(pending, f, ensure_ascii=False, indent=2)
+        print("경고: 이슈를 올리지 못해 %s 에 남김" % path)
+    return 1 if where == "local" and changes else 0
+
+
+def issue_signature(issue: dict) -> Optional[str]:
+    m = SIGNATURE_RE.search(issue.get("body") or "")
+    return m.group(1) if m else None
+
+
+def handle_existing(existing: List[dict], where: str, found: dict, github, dry_run: bool, clean) -> List[dict]:
+    """기존 문제를 이슈로 올리거나 발생 기록을 고친다. 올리지 못한 이슈 목록을 돌려준다."""
+    pending, issues, labels_ready = [], None, False
+    if existing and not dry_run:
+        try:
+            issues = github.issues()
+        except Exception as e:
+            print("경고: gh 이슈 목록 실패: %s" % clean(str(e)))
+    for p in existing:
+        title = clean(issue_title(p))
+        sig = clean(signature(p))
+        if dry_run:
+            print("[기존 → 이슈 (dry-run: 열린 이슈 확인 안 함)] %s" % title)
+            continue
+        labels = ["perf-auto", KIND_LABEL[p["kind"]]]
+        matches = [i for i in (issues or []) if issue_signature(i) == sig]
+        opened = max((i for i in matches if i["state"].upper() == "OPEN"), key=lambda i: i["number"], default=None)
+        closed = max((i for i in matches if i["state"].upper() != "OPEN"), key=lambda i: i["number"], default=None)
+        try:
+            if issues is None:
+                raise GitHubError("이슈 목록을 읽지 못함")
+            if opened:
+                body = clean(record_occurrence(opened["body"], found))
+                try:
+                    github.edit_issue_body(opened["number"], body)
+                except Exception:
+                    pending.append({"number": opened["number"], "title": title, "body": body, "labels": labels})
+                    raise
+                print("[기존 → 이슈 #%d] %s" % (opened["number"], title))
+            elif closed and where == "local":
+                print("[기존 → 이슈 #%d 닫힘, 새로 만들지 않음] %s" % (closed["number"], title))
+            else:
+                body = clean(issue_body(p, found, previous=closed["number"] if closed else None))
+                pending.append({"title": title, "body": body, "labels": labels})
+                if not labels_ready:
+                    github.ensure_labels()
+                    labels_ready = True
+                github.create_issue(title, body, labels)
+                pending.pop()
+                print("[기존 → 새 이슈] %s" % title)
+        except Exception as e:
+            print("경고: gh 실패: %s" % clean(str(e)))
+            if issues is None:
+                pending.append({"title": title, "body": clean(issue_body(p, found)), "labels": labels})
+    return pending
+
+
+def load_baselines(directory: str) -> List[dict]:
+    found = []
+    for path in sorted(glob.glob(os.path.join(directory, "**", "build-metrics.json"), recursive=True)):
+        try:
+            with open(path) as f:
+                found.append(json.load(f))
+        except (OSError, ValueError) as e:
+            print("경고: 기준 건너뜀 %s: %s" % (path, e), file=sys.stderr)
+    return found
+
+
+def run_report(args) -> int:
+    if not os.path.exists(args.input):
+        print("보고서 없음")
+        return 0
+    with open(args.input) as f:
+        data = json.load(f)
+    if args.where == "main" or args.no_changes:
+        mode = "none"
+    else:
+        mode = "ref" if args.changed_from else "merge-base"
+    try:
+        changed = changed_files(REPO_ROOT, mode, args.changed_from)
+    except RuntimeError as e:
+        print("경고: 변경 파일을 알 수 없음: %s" % e)
+        changed = set()
+    baseline = load_baselines(args.baseline_dir) if args.baseline_dir else None
+    metrics = None
+    if args.metrics and os.path.exists(args.metrics):
+        with open(args.metrics) as f:
+            metrics = json.load(f)
+    return report(data, args.where, changed, GitHub(), pr=args.pr, baseline=baseline, metrics=metrics,
+                  dry_run=args.dry_run, out_dir=os.path.join(REPO_ROOT, ".build", "perf"))
+
+
+def run_changed_swift() -> int:
+    for path in sorted(changed_files(REPO_ROOT, "merge-base")):
+        if path.endswith(".swift") and os.path.exists(os.path.join(REPO_ROOT, path)):
+            print(path)
+    return 0
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -283,8 +675,22 @@ def main(argv: List[str]) -> int:
     c.add_argument("--products", required=True)
     c.add_argument("--build-log", action="append", default=[])
     c.add_argument("--out", required=True)
+    r = sub.add_parser("report", help="보고서를 판정해 이슈·PR 코멘트로 올린다")
+    r.add_argument("--input", required=True)
+    r.add_argument("--where", required=True, choices=["local", "pr", "main"])
+    r.add_argument("--changed-from", help="이 ref와 HEAD의 차이를 변경 파일로 본다 (기본: origin/main merge-base)")
+    r.add_argument("--no-changes", action="store_true", help="변경 파일 없음으로 본다")
+    r.add_argument("--pr", type=int)
+    r.add_argument("--baseline-dir")
+    r.add_argument("--metrics")
+    r.add_argument("--dry-run", action="store_true", help="gh를 호출하지 않고 할 일만 출력")
+    sub.add_parser("changed-swift", help="merge-base 이후 변경된 .swift 파일을 줄마다 출력")
     args = parser.parse_args(argv)
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if args.command == "report":
+        return run_report(args)
+    if args.command == "changed-swift":
+        return run_changed_swift()
+    repo_root = REPO_ROOT
     try:
         report = collect(args.since, args.device, args.products, args.build_log, repo_root)
     except CollectError as e:
