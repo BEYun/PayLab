@@ -407,7 +407,7 @@ class ReportTests(unittest.TestCase):
         gh = gh if gh is not None else FakeGitHub()
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            code = pr.report(data, where, set(changed), gh, out_dir=self.out, env={}, **kw)
+            code = pr.report(data, where, None if changed is None else set(changed), gh, out_dir=self.out, env={}, **kw)
         return code, buf.getvalue(), gh
 
     def open_issue(self, problem, number=7, state="OPEN"):
@@ -610,6 +610,112 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(pr.changed_files("/r", "ref", ref="origin/main", run=fake), {"a.swift", "b.swift"})
         self.assertEqual(calls, [["diff", "--name-only", "origin/main", "HEAD"]])
         self.assertEqual(pr.changed_files("/r", "none", run=fake), set())
+
+    def test_changed_files_unknown_raises(self):
+        def fail(cmd, **kw):
+            return types.SimpleNamespace(returncode=128, stdout="", stderr="bad")
+        for mode, ref in (("merge-base", None), ("ref", "HEAD^1")):
+            with self.assertRaises(pr.ChangedFilesUnknown):
+                pr.changed_files("/r", mode, ref=ref, run=fail)  # origin/main 없음, 없는 ref
+
+        def missing(cmd, **kw):
+            raise OSError("git 없음")
+        with self.assertRaises(pr.ChangedFilesUnknown):
+            pr.changed_files("/r", "merge-base", run=missing)
+
+    def test_unknown_changed_set_treats_all_as_change(self):
+        code, out, gh = self.run_report(report_data(hang_problem(), slow_problem()), "local", changed=None)
+        self.assertEqual(code, 1)
+        self.assertEqual(gh.created, [])
+        self.assertIn("경고: 변경 파일을 알 수 없어 모든 문제를 이번 변경으로 봅니다", out)
+        self.assertEqual(out.count("[이번 변경]"), 2)
+
+    def test_unknown_changed_set_in_pr_comments_without_issue(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "pr", changed=None, pr=4)
+        self.assertEqual((gh.created, len(gh.comments), code), ([], 1, 0))
+
+    def test_unknown_changed_set_does_not_affect_main(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "main", changed=None)
+        self.assertEqual(len(gh.created), 1)
+        self.assertNotIn("[이번 변경]", out)
+
+    def test_pr_without_changed_from_is_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            pr.main(["report", "--input", "x.json", "--where", "pr", "--pr", "1"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_record_occurrence_end_marker_deleted(self):
+        body = pr.issue_body(hang_problem(), FOUND).replace(pr.OCC_END, "")
+        body = pr.record_occurrence(body, dict(FOUND, time="T2"))
+        self.assertEqual((body.count(pr.OCC_START), body.count(pr.OCC_END)), (1, 1))
+        self.assertIn("횟수: 2", body)
+        again = pr.record_occurrence(body, dict(FOUND, time="T3"))  # 다음 실행이 사이 내용을 지우지 않는다
+        self.assertIn("횟수: 3", again)
+        self.assertIn("## 우리 코드 스택", again)
+
+    def test_record_occurrence_start_marker_deleted(self):
+        body = pr.issue_body(hang_problem(), FOUND).replace(pr.OCC_START, "")
+        body = pr.record_occurrence(body, FOUND)
+        self.assertEqual((body.count(pr.OCC_START), body.count(pr.OCC_END)), (1, 1))
+        self.assertIn("횟수: 2", body)
+        self.assertIn("## 우리 코드 스택", body)
+
+    def test_record_occurrence_ignores_and_keeps_human_lines(self):
+        body = pr.issue_body(hang_problem(), FOUND).replace(
+            pr.OCC_END, "  - 메모: 재현 안 됨\n사람이 쓴 줄\n" + pr.OCC_END)
+        body = pr.record_occurrence(body, dict(FOUND, commit="c2"))
+        self.assertIn("횟수: 2", body)
+        block = body[body.index(pr.OCC_START):]
+        self.assertEqual(block.count("\n  - 로컬"), 2)  # 사람이 쓴 "  - 메모"는 발생으로 세지 않는다
+        self.assertIn("  - 메모: 재현 안 됨", block)
+        self.assertIn("사람이 쓴 줄", block)
+
+    def test_report_text_never_contains_machine_info(self):
+        udid = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        secret = ["/Users/bob/Secret", udid, "me@example.com", "Yuns-Mac"]
+        p = hang_problem(fn="load(/Users/bob/Secret %s me@example.com Yuns-Mac)" % udid)
+        p["context"] = ["log /Users/bob/Secret %s me@example.com Yuns-Mac" % udid]
+        p["message"] = "x"
+        data = dict(report_data(p, crash_problem()), branch="fix/me@example.com")
+        data["problems"][1]["message"] = "Yuns-Mac /Users/bob/Secret"
+
+        def check(text):
+            for item in secret:
+                self.assertNotIn(item, text)
+        with mock.patch.dict(os.environ, {"HOME": "/Users/bob"}), \
+                mock.patch.object(pr.socket, "gethostname", lambda: "Yuns-Mac"):
+            sig = pr.sanitize(pr.signature(p), REPO)
+            clean_issue = {"number": 3, "state": "OPEN", "title": "t",
+                           "body": pr.sanitize(pr.issue_body(p, FOUND), REPO)}
+            self.assertIn(sig, clean_issue["body"])
+            _, out, gh = self.run_report(data, "main")
+            check(out)
+            for title, body, _ in gh.created:
+                check(title), check(body)
+            self.assertEqual(len(gh.created), 2)
+            _, out, gh = self.run_report(data, "main", gh=FakeGitHub([clean_issue]))
+            self.assertEqual(len(gh.edited), 1)  # 열린 이슈 하나는 고치고, 크래시는 새로 만든다
+            check(gh.edited[0][1])
+            for title, body, _ in gh.created:
+                check(title), check(body)
+            code, out, gh = self.run_report(data, "pr", changed={SRC}, pr=9)
+            check(out)
+            check(gh.comments[0][1])
+            self.assertIn("[이번 변경]", out)
+
+    def test_at_sign_in_function_name_is_defused(self):
+        fn = "closure #1 @Sendable () -> () in X.y()"
+        p = hang_problem(fn=fn)
+        self.assertNotIn("@", pr.issue_title(p))
+        self.assertIn("＠Sendable", pr.issue_title(p))
+        self.assertIn("`%s`" % fn, pr.issue_body(p, FOUND))
+        code, out, gh = self.run_report(report_data(p, slow_problem(name="closure @MainActor")), "pr", changed={SRC}, pr=1)
+        self.assertNotIn("@", gh.comments[0][1].replace("<!--", "").replace("-->", ""))
+        self.assertIn("`closure @MainActor", pr.issue_body(slow_problem(name="closure @MainActor"), FOUND))
+
+    def test_created_issue_line_has_number(self):
+        code, out, gh = self.run_report(report_data(hang_problem()), "main")
+        self.assertIn("[기존 → 이슈 #1] [hang] HistoryModel.load() 412ms", out)
 
 
 class GitHubTests(unittest.TestCase):

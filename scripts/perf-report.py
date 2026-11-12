@@ -292,21 +292,28 @@ class GitHubError(Exception):
     """gh 호출 실패(비 0 종료)."""
 
 
+class ChangedFilesUnknown(RuntimeError):
+    """변경 파일 집합을 알 수 없음(origin/main 없음, git 실패, ref 없음). 호출 쪽은 모든 문제를 이번 변경으로 본다."""
+
+
 def changed_files(repo_root: str, mode: str, ref: Optional[str] = None, run=subprocess.run) -> Set[str]:
     def git(*args: str) -> List[str]:
-        result = run(["git", "-C", repo_root] + list(args), capture_output=True, text=True)
+        try:
+            result = run(["git", "-C", repo_root] + list(args), capture_output=True, text=True)
+        except OSError as e:
+            raise ChangedFilesUnknown("git 실행 실패: %s" % e)
         if result.returncode != 0:
-            raise RuntimeError("git %s 실패 (exit %s)" % (args[0], result.returncode))
+            raise ChangedFilesUnknown("git %s 실패 (exit %s)" % (args[0], result.returncode))
         return [line for line in result.stdout.splitlines() if line]
 
     if mode == "none":
         return set()
     if mode == "ref":
         return set(git("diff", "--name-only", ref, "HEAD"))
-    try:
-        base = git("merge-base", "origin/main", "HEAD")[0]
-    except (RuntimeError, IndexError):
-        base = "HEAD"  # origin/main이 없으면 스테이징·미스테이징 변경만 본다
+    bases = git("merge-base", "origin/main", "HEAD")
+    if not bases:
+        raise ChangedFilesUnknown("merge-base를 찾지 못함")
+    base = bases[0]
     return set(git("diff", "--name-only", base)) | set(git("ls-files", "--others", "--exclude-standard"))
 
 
@@ -349,6 +356,10 @@ def sanitize(text: str, repo_root: str) -> str:
 
 
 def issue_title(problem: dict) -> str:
+    return plain_title(problem).replace("@", "＠")  # 제목은 코드로 감쌀 수 없어 @멘션을 막는다
+
+
+def plain_title(problem: dict) -> str:
     kind = problem["kind"]
     if kind == "hang":
         return "[hang] %s %dms" % (innermost_function(problem), problem["duration_ms"])
@@ -373,9 +384,10 @@ def found_line(found: dict) -> str:
     return " · ".join(x for x in (found["where"], found["branch"], found["commit"]) if x)
 
 
-def occurrence_block(count: int, found: dict, recent: List[str]) -> str:
+def occurrence_block(count: int, found: dict, recent: List[str], extra: Optional[List[str]] = None) -> str:
     lines = [OCC_START, "## 발생 기록", "- 횟수: %d" % count, "- 마지막 발견: %s" % found["time"], "- 최근 발견한 곳:"]
     lines += ["  - %s" % entry for entry in recent[:MAX_RECENT]]
+    lines += extra or []
     lines.append(OCC_END)
     return "\n".join(lines)
 
@@ -387,7 +399,7 @@ def issue_body(problem: dict, found: dict, previous: Optional[int] = None) -> st
     elif kind == "crash":
         figure = "크래시 %s" % problem.get("exception")
     elif kind == "slow-function":
-        figure = "타입 검사 %dms (기준 100ms) — %s" % (problem["ms"], problem["name"])
+        figure = "타입 검사 %dms (기준 100ms) — `%s`" % (problem["ms"], problem["name"])
     else:
         figure = "우리 코드 컴파일 시간 +%.0f%% (+%.1f초). 현재 %.1f초, 최근 중앙값 %.1f초" % (
             problem["increase_pct"], problem["increase_s"], problem["current"], problem["median"])
@@ -405,26 +417,33 @@ def issue_body(problem: dict, found: dict, previous: Optional[int] = None) -> st
         parts.append("## 우리 코드 스택")
         for f in stack:
             where = "%s:%s" % (f["file"], f["line"]) if f.get("line") else f["file"]
-            parts.append("- %s — %s" % (f.get("function") or f.get("symbol") or "?", where))
+            parts.append("- `%s` — `%s`" % (f.get("function") or f.get("symbol") or "?", where))
     if problem.get("message"):
         parts += ["## 원문", "```", problem["message"], "```"]
     parts += ["<!-- perf-signature: %s -->" % signature(problem), occurrence_block(1, found, [found_line(found)])]
     return "\n".join(parts)
 
 
+RECENT_RE = re.compile(r"^  - ((?:로컬|CI) · .*)$")
+OWN_LINE_RES = [re.compile(x) for x in (r"^## 발생 기록$", r"^- 횟수: \d+$", r"^- 마지막 발견: .*$", r"^- 최근 발견한 곳:$")]
+
+
 def record_occurrence(body: str, found: dict) -> str:
+    """표식이 하나씩 제대로 있으면 블록을 고친다. 아니면 표식을 모두 지우고 새 블록을 끝에 붙인다.
+    이때 횟수는 본문에서 읽은 가장 큰 `횟수:` 값에서 이어간다(없으면 1부터)."""
     start, end = body.find(OCC_START), body.find(OCC_END)
-    count, recent = 0, []
-    if start >= 0 and end > start:
-        block = body[start:end]
-        m = re.search(r"횟수: (\d+)", block)
-        count = int(m.group(1)) if m else 0
-        recent = re.findall(r"^  - (.*)$", block, re.M)
-        head, tail = body[:start], body[end + len(OCC_END):]
-    else:
-        head, tail = body.rstrip("\n") + "\n", ""
-    new = occurrence_block(count + 1, found, [found_line(found)] + recent)
-    return head + new + tail
+    valid = body.count(OCC_START) == 1 and body.count(OCC_END) == 1 and start < end
+    if not valid:
+        counts = [int(n) for n in re.findall(r"^- 횟수: (\d+)$", body, re.M)]
+        cleaned = body.replace(OCC_START, "").replace(OCC_END, "").rstrip("\n")
+        return cleaned + "\n" + occurrence_block(max(counts, default=0) + 1, found, [found_line(found)])
+    inner = body[start + len(OCC_START):end].splitlines()
+    m = next((re.match(r"^- 횟수: (\d+)$", line) for line in inner if re.match(r"^- 횟수: (\d+)$", line)), None)
+    recent = [RECENT_RE.match(line).group(1) for line in inner if RECENT_RE.match(line)]
+    extra = [line for line in inner if line.strip() and not RECENT_RE.match(line)
+             and not any(r.match(line) for r in OWN_LINE_RES)]  # 사람이 블록 안에 쓴 줄은 보존
+    new = occurrence_block((int(m.group(1)) if m else 0) + 1, found, [found_line(found)] + recent, extra)
+    return body[:start] + new + body[end + len(OCC_END):]
 
 
 def median(values: List[float]) -> float:
@@ -522,11 +541,11 @@ def pr_comment_body(changes: List[dict], found: dict) -> str:
         return "%s\n## 성능 리포트\n문제 없음 (%s)" % (PR_MARKER, found["commit"])
     lines = [PR_MARKER, "## 성능 리포트", "이번 변경과 엮인 문제 %d개 (%s)" % (len(changes), found["commit"])]
     for p in changes:
-        lines.append("- %s %s" % (issue_title(p), location(p)))
+        lines.append(("- `%s` `%s`" % (issue_title(p), location(p))).replace(" ``", ""))
     return "\n".join(lines)
 
 
-def report(data: dict, where: str, changed: Set[str], github, pr: Optional[int] = None,
+def report(data: dict, where: str, changed: Optional[Set[str]], github, pr: Optional[int] = None,
            baseline: Optional[List[dict]] = None, metrics: Optional[dict] = None, dry_run: bool = False,
            out_dir: str = ".build/perf", env=None, repo_root: str = REPO_ROOT) -> int:
     env = os.environ if env is None else env
@@ -539,6 +558,9 @@ def report(data: dict, where: str, changed: Set[str], github, pr: Optional[int] 
         regression = build_regression(metrics, baseline or [])
         if regression:
             problems.append(regression)
+    unknown = changed is None and where != "main"
+    if unknown:
+        print("경고: 변경 파일을 알 수 없어 모든 문제를 이번 변경으로 봅니다")
     changes, existing = [], []
     for p in problems:
         if where == "main":
@@ -546,7 +568,7 @@ def report(data: dict, where: str, changed: Set[str], github, pr: Optional[int] 
         elif p["kind"] == "build-time":
             (changes if where == "pr" else existing).append(p)
         else:
-            (changes if classify(p, changed) == "change" else existing).append(p)
+            (changes if unknown or classify(p, changed) == "change" else existing).append(p)
     if where == "local":
         existing = [p for p in existing if p["kind"] != "slow-function"]  # 로컬은 느린 함수의 기존 문제를 무시
     for p in changes:
@@ -614,9 +636,10 @@ def handle_existing(existing: List[dict], where: str, found: dict, github, dry_r
                 if not labels_ready:
                     github.ensure_labels()
                     labels_ready = True
-                github.create_issue(title, body, labels)
+                url = github.create_issue(title, body, labels)
                 pending.pop()
-                print("[기존 → 새 이슈] %s" % title)
+                m = re.search(r"/(\d+)\s*$", url or "")
+                print("[기존 → 이슈 #%s] %s" % (m.group(1), title) if m else "[기존 → 새 이슈] %s" % title)
         except Exception as e:
             print("경고: gh 실패: %s" % clean(str(e)))
             if issues is None:
@@ -647,9 +670,9 @@ def run_report(args) -> int:
         mode = "ref" if args.changed_from else "merge-base"
     try:
         changed = changed_files(REPO_ROOT, mode, args.changed_from)
-    except RuntimeError as e:
-        print("경고: 변경 파일을 알 수 없음: %s" % e)
-        changed = set()
+    except ChangedFilesUnknown as e:
+        print("경고: 변경 파일 확인 실패: %s" % e)
+        changed = None
     baseline = load_baselines(args.baseline_dir) if args.baseline_dir else None
     metrics = None
     if args.metrics and os.path.exists(args.metrics):
@@ -660,7 +683,12 @@ def run_report(args) -> int:
 
 
 def run_changed_swift() -> int:
-    for path in sorted(changed_files(REPO_ROOT, "merge-base")):
+    try:
+        paths = sorted(changed_files(REPO_ROOT, "merge-base"))
+    except ChangedFilesUnknown as e:
+        print("경고: 변경 파일을 알 수 없음: %s" % e, file=sys.stderr)
+        return 0
+    for path in paths:
         if path.endswith(".swift") and os.path.exists(os.path.join(REPO_ROOT, path)):
             print(path)
     return 0
@@ -687,6 +715,8 @@ def main(argv: List[str]) -> int:
     sub.add_parser("changed-swift", help="merge-base 이후 변경된 .swift 파일을 줄마다 출력")
     args = parser.parse_args(argv)
     if args.command == "report":
+        if args.where == "pr" and not args.changed_from and not args.no_changes:
+            parser.error("--where pr 에는 --changed-from 또는 --no-changes가 필요함")
         return run_report(args)
     if args.command == "changed-swift":
         return run_changed_swift()
