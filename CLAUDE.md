@@ -223,7 +223,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 - 위 "현재 6개"는 기반 단계 기준이다.
 
 ### 테스트 개수 (2026-11-12)
-- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 84개(`scripts/test_perf_report.py`, `unittest`, 2026-11-12 최종 리뷰 반영 후 실행 결과 `Ran 84 tests`).
+- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 81개(`scripts/test_perf_report.py`, `unittest`, 2026-11-12 최종 리뷰 반영 후 실행 결과 `Ran 81 tests`).
 
 ## 트랜잭션 (송금 정합성)
 
@@ -293,8 +293,6 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 - 위치 파일: crash·hang은 스택의 **모든** 우리 코드 프레임 파일, 느린 함수는 경고가 가리킨 파일. 컴파일 시간은 파일 없음(PR = 이번 변경, main = 기존).
 - 위치 파일 중 하나라도 변경 파일이면 "이번 변경", 아니면 "기존".
 - 스택에 우리 코드가 없는 크래시는 컴파일 시간처럼: 로컬·PR = "이번 변경"(이슈 없음), main = "기존". 서명은 가장 안쪽의 기호화된 프레임 함수(없으면 기호)라 시스템 코드만 있는 크래시끼리 섞이지 않는다.
-- 기호화에 쓴 바이너리가 문제보다 나중에 바뀌었으면(수정 시각 기준) 그 문제에 `"stale_binary": true` + `warnings`가 붙는다. 함수·파일이 틀릴 수 있어 main에서도 "이번 변경"으로 보고 이슈로 올리지 않는다.
-  - `test-all.sh`는 UI 단계 빌드가 `PayLab.debug.dylib`을 다시 서명해(코드는 같고 수정 시각만 바뀜) 단위·통합 단계에서 난 hang·크래시가 여기에 걸린다. 그래서 로컬에서는 그 단계의 기존 문제도 커밋을 막는다. CI는 한 번만 빌드해 해당 없음.
 - 변경 파일: 로컬 = `origin/main` merge-base 이후 커밋 + 스테이징 + 미스테이징 + 새 파일(`git fetch` 안 함). PR = `--changed-from HEAD^1`. main push = 판정 없음(모두 기존).
 - 변경 파일을 알 수 없으면 전부 "이번 변경"으로 본다.
 - 로컬은 변경된 Swift 파일의 느린 함수만 본다. `test-all.sh`가 빌드 전에 그 파일을 `touch`해 다시 컴파일시킨다. 기존 느린 함수는 CI가 잡는다.
@@ -326,7 +324,7 @@ START=$(date '+%Y-%m-%d %H:%M:%S')   # 확인을 시작할 때 기록
 python3 -I scripts/perf-report.py collect --since "$START" --device "$UDID" --products .build/DerivedData/Build/Products/Debug-iphonesimulator --out .build/perf/report.json
 python3 -I scripts/perf-report.py report --input .build/perf/report.json --where local   # 이번 변경이면 [이번 변경] 줄 + 종료 1
 ```
-- 기호화는 `.build/DerivedData`의 마지막 빌드 바이너리로 한다. 확인한 앱과 같은 빌드여야 한다. 확인 뒤 다시 빌드했으면 `stale_binary`로 "이번 변경"이 된다. `--build-log`를 빼면 느린 함수 경고는 수집하지 않는다.
+- 기호화는 `.build/DerivedData`의 마지막 빌드 바이너리로 한다. 확인한 앱과 같은 빌드여야 한다. 앱을 실행한 뒤 `collect`까지 다시 빌드하지 않는다. 다시 빌드하면 기호가 엉뚱한 코드를 가리킨다(스크립트는 이것을 알아채지 못한다). `--build-log`를 빼면 느린 함수 경고는 수집하지 않는다.
 - `report`에 `--dry-run`을 붙이면 `gh`를 부르지 않고 할 일만 출력한다. `--no-changes`는 변경 파일 없음으로 본다(시연·테스트용).
 
 ### CI

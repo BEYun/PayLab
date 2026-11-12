@@ -29,7 +29,7 @@ HANG_RE = re.compile(r"^hang id=(\d+) duration=(\d+)ms frames=\d+$")
 HANG_FRAME_RE = re.compile(r"^hang frame id=(\d+) #\d+ (\S+) 0x([0-9a-f]+) base=0x([0-9a-f]+) (.*)$")
 SLOW_RE = re.compile(r"^(.+?):(\d+):\d+: warning: (.+?) took (\d+)ms to type-check \(limit: \d+ms\)")
 TIMING_RE = re.compile(r"^\s*(\S.*?) \(\d+ tasks?\) \| ([\d.]+) seconds")
-TIME_FORMATS = ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S.%f%z")  # 마지막은 log show ndjson
+TIME_FORMATS = ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z")
 TOOL_TIMEOUT = 120  # dsymutil·atos 한 번 (초). hook 전체 예산은 600초
 GH_TIMEOUT = 60  # gh 한 번 (초)
 
@@ -42,7 +42,7 @@ ATOS_RE = re.compile(r"^(.*?) \(in .*?\)(?: \((.+):(\d+)\))?(?: \+ \d+)?$")
 
 
 def parse_time(text: str) -> datetime.datetime:
-    """오프셋이 있는 리포트·로그 시각 -> aware datetime."""
+    """오프셋이 있는 리포트 시각 -> aware datetime."""
     for fmt in TIME_FORMATS:
         try:
             return datetime.datetime.strptime(text, fmt)
@@ -228,21 +228,6 @@ def git_output(run, repo_root: str, *args: str, default: str = "unknown") -> str
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else default
 
 
-def mark_stale_binary(problem: dict, products_dir: str, warnings: List[str]) -> dict:
-    """기호화에 쓴 바이너리가 문제가 난 뒤에 바뀌었으면(다시 빌드) "stale_binary": true와 경고를 남긴다.
-    그 바이너리로 찾은 함수·파일은 틀릴 수 있다. report는 이 문제를 이슈로 올리지 않는다."""
-    when = parse_time(problem["time"]).timestamp()
-    for image in collections.OrderedDict.fromkeys(f["image"] for f in problem["frames"] if f["image"] != "?"):
-        binary = find_binary(products_dir, image)
-        if binary and os.path.getmtime(binary) > when:
-            problem["stale_binary"] = True
-            warning = "%s 바이너리가 %s(%s) 뒤에 바뀜: 기호화가 틀릴 수 있어 이번 변경으로 봄" % (
-                image, problem["kind"], problem["time"])
-            if warning not in warnings:
-                warnings.append(warning)
-    return problem
-
-
 def collect(since: str, device: str, products_dir: str, build_logs: List[str], repo_root: str,
             run=subprocess.run, crash_dir: Optional[str] = None, env=None) -> dict:
     env = os.environ if env is None else env
@@ -268,9 +253,8 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
             if not files:
                 ignored += 1
                 continue
-            problem = {"kind": "hang", "duration_ms": hang["duration_ms"], "time": hang["time"],
-                       "frames": frames, "files": files, "context": hang["context"]}
-            problems.append(mark_stale_binary(problem, products_dir, warnings))
+            problems.append({"kind": "hang", "duration_ms": hang["duration_ms"], "time": hang["time"],
+                             "frames": frames, "files": files, "context": hang["context"]})
         pattern = os.path.join(crash_dir, "PayLab-*.ips") if crash_dir else os.path.expanduser(CRASH_GLOB)
         for path in sorted(glob.glob(pattern)):
             try:
@@ -286,9 +270,8 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
                 warnings.append("크래시 리포트 건너뜀 %s: %s %s" % (os.path.basename(path), type(e).__name__, e))
                 continue
             frames = sym(crash["frames"])
-            problem = {"kind": "crash", "exception": crash["exception"], "message": crash["message"],
-                       "time": crash["time"], "frames": frames, "files": frame_files(frames), "context": []}
-            problems.append(mark_stale_binary(problem, products_dir, warnings))
+            problems.append({"kind": "crash", "exception": crash["exception"], "message": crash["message"],
+                             "time": crash["time"], "frames": frames, "files": frame_files(frames), "context": []})
     timing, slow_seen = {}, set()
     for path in build_logs:
         with open(path, errors="replace") as f:
@@ -574,11 +557,8 @@ def merge_duplicates(problems: List[dict]) -> List[dict]:
             continue
         kept = merged[sig]
         kept["files"] += [f for f in p.get("files", []) if f not in kept["files"]]
-        stale = kept.get("stale_binary") or p.get("stale_binary")
         if p["kind"] == "hang" and p["duration_ms"] > kept["duration_ms"]:
-            merged[sig] = kept = dict(p, files=kept["files"])
-        if stale:  # 하나라도 기호화를 믿을 수 없으면 합친 문제도 그렇다
-            kept["stale_binary"] = True
+            merged[sig] = dict(p, files=kept["files"])
     return list(merged.values())
 
 
@@ -619,9 +599,7 @@ def report(data: dict, where: str, changed: Optional[Set[str]], github, pr: Opti
         print("경고: 변경 파일을 알 수 없어 모든 문제를 이번 변경으로 봅니다")
     changes, existing = [], []
     for p in problems:
-        if p.get("stale_binary"):
-            changes.append(p)  # 문제 뒤에 바이너리가 바뀌어 기호화를 믿을 수 없다. main에서도 이슈로 올리지 않는다
-        elif where == "main":
+        if where == "main":
             existing.append(p)
         elif p["kind"] == "build-time":
             (changes if where == "pr" else existing).append(p)

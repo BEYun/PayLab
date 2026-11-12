@@ -246,13 +246,10 @@ class CollectTests(unittest.TestCase):
             "files": ["Modules/HomeFeature/Sources/HistoryModel.swift"]}])
         self.assertEqual(report["timing"], {"SwiftCompile": 2.5})
 
-    BUILT = pr.parse_time("2026-11-12 09:00:00 +0900").timestamp()  # 고정 문제 시각(10시대)보다 이른 빌드
-
-    def add_binary(self, rel, built=None):
+    def add_binary(self, rel):
         path = os.path.join(self.products, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, "w").close()
-        os.utime(path, (built or self.BUILT,) * 2)
 
     def rewrite_crash(self, name, captured, header):
         path = os.path.join(self.crash_dir, name)
@@ -290,28 +287,6 @@ class CollectTests(unittest.TestCase):
         self.assertEqual((problem["kind"], problem["duration_ms"]), ("hang", 412))
         self.assertEqual(problem["files"], ["Modules/HomeFeature/Sources/HistoryModel.swift"])
         self.assertEqual(problem["context"], ["load start"])
-        self.assertNotIn("stale_binary", problem)  # 바이너리(09시)가 hang(10시)보다 먼저
-
-    def test_binary_rebuilt_after_problem_marks_stale(self):
-        self.add_binary("HomeFeature.framework/HomeFeature", built=pr.parse_time("2026-11-12 10:30:00 +0900").timestamp())
-
-        def tool(cmd):
-            return ok("f() (in HomeFeature) (%s/Modules/HomeFeature/Sources/HistoryModel.swift:42)\n" % REPO) \
-                if "atos" in cmd else ok()
-        report = self.collect(hang_lines=self.HANG_IN_HOMEFEATURE, since="2026-11-12 11:00:00", tool=tool)
-        self.assertTrue(report["problems"][0]["stale_binary"])
-        self.assertEqual(len(report["warnings"]), 1)
-        self.assertIn("HomeFeature 바이너리가 hang(2026-11-12 10:00:00.000000+0900) 뒤에 바뀜", report["warnings"][0])
-
-    def test_crash_with_rebuilt_binary_is_stale(self):
-        self.add_binary("PayLab.app/PayLab.debug.dylib", built=pr.parse_time("2026-11-12 10:05:01 +0900").timestamp())
-
-        def tool(cmd):
-            return ok("PayLabModel.load() (in PayLab.debug.dylib) (%s/Modules/App/Sources/Model.swift:9)\n" % REPO) \
-                if "atos" in cmd else ok()
-        crash = self.collect(tool=tool)["problems"][0]
-        self.assertEqual(crash["kind"], "crash")
-        self.assertTrue(crash["stale_binary"])
 
     def test_branch_falls_back_to_ci_env(self):
         def branch(env):
@@ -819,21 +794,6 @@ class ReportTests(unittest.TestCase):
         atos_named = dict(a, frames=[frame(image="X", function="X.f()", symbol="$sX")] + a["frames"])
         self.assertEqual(pr.signature(atos_named), "crash|EXC_CRASH|X.f()")  # 함수 이름이 기호보다 먼저
         self.assertEqual(pr.signature(crash_problem()), "crash|EXC_BREAKPOINT|HistoryModel.load()")  # 앱 프레임 우선
-
-    def test_stale_binary_is_change_even_on_main(self):
-        stale = dict(hang_problem(), stale_binary=True)
-        code, out, gh = self.run_report(report_data(stale), "main")
-        self.assertEqual((code, gh.created, gh.edited), (0, [], []))
-        self.assertIn("[이번 변경] [hang] HistoryModel.load() 412ms", out)
-        code, out, gh = self.run_report(report_data(stale), "local", changed={"other.swift"})
-        self.assertEqual((code, gh.created), (1, []))
-        code, out, gh = self.run_report(report_data(stale), "pr", changed={"other.swift"}, pr=2)
-        self.assertEqual(gh.created, [])
-        self.assertFalse(gh.comments[0][2])
-        for pair in ([hang_problem(ms=900), stale], [stale, hang_problem(ms=900)]):  # 합쳐도 오래된 표시는 남는다
-            code, out, gh = self.run_report(report_data(*pair), "main")
-            self.assertEqual(gh.created, [])
-            self.assertIn("900ms", out)
 
     def test_closed_not_planned_only_prints_in_all_modes(self):
         closed = self.open_issue(hang_problem(), number=5, state="CLOSED", reason="NOT_PLANNED")
