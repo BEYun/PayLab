@@ -22,6 +22,30 @@ struct FakeServerTests {
         #expect(recipients.map(\.id) == ["rcp-1", "rcp-2", "rcp-3"])
     }
 
+    @Test func transactionsRouteIsDeterministic() throws {
+        let first = server.handle(method: "GET", path: "/accounts/acc-main/transactions", body: nil)
+        let second = server.handle(method: "GET", path: "/accounts/acc-main/transactions", body: nil)
+        #expect(first.statusCode == 200)
+        #expect(second.statusCode == 200)
+        let a = try JSONDecoder().decode([Transaction].self, from: first.body)
+        let b = try JSONDecoder().decode([Transaction].self, from: second.body)
+        #expect(a == b)
+        #expect(a.count == FakeServer.transactionsPerAccount)
+        #expect(Set(a.map(\.id)).count == a.count)
+    }
+
+    @Test func transactionsAreNotDateSorted() throws {
+        let result = server.handle(method: "GET", path: "/accounts/acc-main/transactions", body: nil)
+        let dates = try JSONDecoder().decode([Transaction].self, from: result.body).map(\.date)
+        let pairs = zip(dates, dates.dropFirst())
+        #expect(!pairs.allSatisfy { $0 >= $1 })  // 내림차순 아님
+        #expect(!pairs.allSatisfy { $0 <= $1 })  // 오름차순 아님
+    }
+
+    @Test func transactionsUnknownAccountReturns404() {
+        #expect(server.handle(method: "GET", path: "/accounts/none/transactions", body: nil).statusCode == 404)
+    }
+
     @Test(arguments: [("GET", "/unknown"), ("DELETE", "/accounts"), ("GET", "/transfers")])
     func unknownRouteReturns404(method: String, path: String) {
         #expect(server.handle(method: method, path: path, body: nil).statusCode == 404)

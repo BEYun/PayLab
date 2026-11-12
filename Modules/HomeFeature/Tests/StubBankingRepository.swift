@@ -23,6 +23,11 @@ final class StubBankingRepository: BankingRepository {
         throw BankingError.server(statusCode: 0)
     }
 
+    func fetchTransactions(accountID: String) async throws -> [Transaction] {
+        Issue.record("HomeModel는 fetchTransactions를 부르지 않아야 한다")
+        throw BankingError.server(statusCode: 0)
+    }
+
     func transfer(_ request: TransferRequest, idempotencyKey: String) async throws -> TransferReceipt {
         Issue.record("HomeModel은 transfer를 부르지 않아야 한다")
         throw BankingError.server(statusCode: 0)

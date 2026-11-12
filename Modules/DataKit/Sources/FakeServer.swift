@@ -11,6 +11,7 @@ public enum TransferFault: String, Sendable, CaseIterable {
 
 public final class FakeServer: Sendable {
     public static let idempotencyKeyHeader = "Idempotency-Key"
+    public static let transactionsPerAccount = 5_000
 
     public struct Response: Sendable {
         public let statusCode: Int
@@ -65,8 +66,28 @@ public final class FakeServer: Sendable {
         case ("GET", _) where path.hasPrefix("/transfers/"):
             let key = String(path.dropFirst("/transfers/".count))
             return state.withLock { $0.transfers[key] }.map { ok($0.receipt) } ?? failure(404)
+        case ("GET", _) where path.hasPrefix("/accounts/") && path.hasSuffix("/transactions"):
+            let id = String(path.dropFirst("/accounts/".count).dropLast("/transactions".count))
+            guard state.withLock({ $0.accounts.contains { $0.id == id } }) else { return failure(404) }
+            return ok(Self.makeTransactions(accountID: id))
         default:
             return failure(404)
+        }
+    }
+
+    private static let transactionBaseDate = Date(timeIntervalSince1970: 1_793_491_200)  // 2026-11-01 00:00 UTC, 고정
+    private static let transactionTitles = ["편의점", "월급", "카페", "김하늘"]
+
+    /// 계좌마다 같은 결과. 날짜는 기준 시각에서 10분씩 거꾸로, 순서는 날짜순이 아니게 섞는다.
+    private static func makeTransactions(accountID: String) -> [Transaction] {
+        let count = transactionsPerAccount
+        return (0..<count).map { position in
+            let k = (position * 7_919) % count  // 7919는 소수라 count와 서로소 → 순열
+            let title = transactionTitles[k % transactionTitles.count]
+            let amount = (k % 7 + 1) * (title == "월급" ? 300_000 : -1_500)
+            return Transaction(id: "tx-\(accountID)-\(k)",
+                               date: transactionBaseDate.addingTimeInterval(-Double(k) * 600),
+                               title: title, amount: amount)
         }
     }
 

@@ -51,3 +51,17 @@ public struct TransferReceipt: Hashable, Codable, Sendable {
         self.balanceAfter = balanceAfter
     }
 }
+
+public struct Transaction: Identifiable, Hashable, Codable, Sendable {
+    public let id: String
+    public let date: Date
+    public let title: String
+    public let amount: Int  // 원. 입금 +, 출금 -
+
+    public init(id: String, date: Date, title: String, amount: Int) {
+        self.id = id
+        self.date = date
+        self.title = title
+        self.amount = amount
+    }
+}
