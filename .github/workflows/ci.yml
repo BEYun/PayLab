@@ -96,12 +96,12 @@ jobs:
       - name: 최근 main 측정값 받기
         run: |
           mkdir -p baseline
-          gh run list --workflow ci.yml --branch main --event push --status success --limit 10 --json databaseId --jq '.[].databaseId' \
-            | grep -vx "$GITHUB_RUN_ID" | head -n 5 \
-            | while read -r id; do
-                gh run download "$id" -n build-metrics -D "baseline/$id" || echo "run $id: build-metrics 없음"  # 없으면 넘어간다
-              done
-          true
+          n=0
+          for id in $(gh run list --workflow ci.yml --branch main --event push --status success --limit 20 --json databaseId --jq '.[].databaseId' | grep -vx "$GITHUB_RUN_ID"); do
+            [ "$n" -ge 5 ] && break
+            if gh run download "$id" -n build-metrics -D "baseline/$id"; then n=$((n + 1)); else echo "run $id: build-metrics 없음"; fi  # 없으면 다음 실행으로
+          done
+          echo "기준 $n개"
 
       - name: 보고 (PR)
         if: github.event_name == 'pull_request'
@@ -116,7 +116,14 @@ jobs:
       - name: 측정값 요약
         if: ${{ !cancelled() }}
         run: |
+          if [ ! -f .build/perf/report.json ]; then
+            echo "::warning::성능 보고서 없음 — 수집 실패 또는 수집 전 실패"
+          fi
           {
+            if [ ! -f .build/perf/report.json ]; then
+              echo "**성능 보고서 없음 — 수집 실패 또는 수집 전 실패**"
+              echo
+            fi
             echo "| 이름 | 값 |"
             echo "|---|---|"
             jq -r '"| 우리 코드 컴파일(초) | \(.swift_compile_s // "없음") |",

@@ -722,12 +722,14 @@ class CiMetricsTests(unittest.TestCase):
     # 설계 §1 실측: 빌드 단계 376초, 첫 출력까지 263초
     JOBS = {"jobs": [{"id": 77, "name": "other", "steps": []},
                      {"id": 99, "name": "build-and-test", "steps": [
-                         {"name": "프로젝트 생성", "started_at": "2026-11-11T06:00:00Z", "completed_at": "2026-11-11T06:09:00Z"},
-                         {"name": "빌드", "started_at": "2026-11-11T06:09:30Z", "completed_at": "2026-11-11T06:15:46Z"}]}]}
+                         {"name": "프로젝트 생성", "started_at": "2026-11-11T06:15:51Z", "completed_at": "2026-11-11T06:16:02Z"},
+                         {"name": "빌드", "started_at": "2026-11-11T06:17:24Z", "completed_at": "2026-11-11T06:23:40Z"}]}]}
     LOG = ("2026-11-11T06:00:10.1000000Z Command line invocation: tuist\n"  # 빌드 단계 전 줄은 무시
-           "2026-11-11T06:09:30.1000000Z ##[group]Run xcodebuild\n"
-           "2026-11-11T06:13:53.4000000Z Command line invocation:\n"
-           "2026-11-11T06:15:40.0000000Z Command line invocation:\n")
+           "2026-11-11T06:17:26.7524350Z ##[group]Run set -o pipefail\n"  # 실제 로그(run 42971182297)를 줄인 것
+           "2026-11-11T06:17:40.2309320Z shell: /bin/bash -e {0}\n"
+           "2026-11-11T06:17:40.2312690Z ##[endgroup]\n"
+           "2026-11-11T06:22:03.4665390Z Command line invocation:\n"
+           "2026-11-11T06:23:30.0000000Z Command line invocation:\n")
     REPORT = {"commit": "abc1234", "timing": {"SwiftCompile": 23.0, "SwiftExplicitDependencyGeneratePcm": 6.0,
                                                "SwiftExplicitDependencyCompileModuleFromInterface": 2.0, "Ld": 1.0}}
 

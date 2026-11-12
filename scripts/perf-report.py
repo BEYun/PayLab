@@ -697,10 +697,16 @@ def ci_metrics(report: Optional[dict], run_id: str, repo: str, run=subprocess.ru
         if start and end:
             metrics["build_step_s"] = round((end - start).total_seconds())
         log = gh_text(run, "--allow-escape-sequences", "repos/%s/actions/jobs/%s/logs" % (repo, job["id"]))
+        shell_start = None  # 단계 헤더 뒤 첫 ##[endgroup] = 셸 시작 (러너의 단계 준비 시간 제외)
         for line in log.splitlines():
             when = parse_iso(line)
-            if start and when and when >= start and "Command line invocation" in line:
-                metrics["xcodebuild_start_s"] = round((when - start).total_seconds())
+            if not (start and when and when >= start):
+                continue
+            if shell_start is None:
+                if "##[endgroup]" in line:
+                    shell_start = when
+            elif "Command line invocation" in line:
+                metrics["xcodebuild_start_s"] = round((when - shell_start).total_seconds())
                 break
     except (GitHubError, ValueError, KeyError, StopIteration, OSError) as e:
         print("경고: CI 단계 시간을 못 구함: %s" % type(e).__name__, file=sys.stderr)
