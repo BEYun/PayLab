@@ -718,6 +718,70 @@ class ReportTests(unittest.TestCase):
         self.assertIn("[기존 → 이슈 #1] [hang] HistoryModel.load() 412ms", out)
 
 
+class CiMetricsTests(unittest.TestCase):
+    # 설계 §1 실측: 빌드 단계 376초, 첫 출력까지 263초
+    JOBS = {"jobs": [{"id": 77, "name": "other", "steps": []},
+                     {"id": 99, "name": "build-and-test", "steps": [
+                         {"name": "프로젝트 생성", "started_at": "2026-11-11T06:00:00Z", "completed_at": "2026-11-11T06:09:00Z"},
+                         {"name": "빌드", "started_at": "2026-11-11T06:09:30Z", "completed_at": "2026-11-11T06:15:46Z"}]}]}
+    LOG = ("2026-11-11T06:00:10.1000000Z Command line invocation: tuist\n"  # 빌드 단계 전 줄은 무시
+           "2026-11-11T06:09:30.1000000Z ##[group]Run xcodebuild\n"
+           "2026-11-11T06:13:53.4000000Z Command line invocation:\n"
+           "2026-11-11T06:15:40.0000000Z Command line invocation:\n")
+    REPORT = {"commit": "abc1234", "timing": {"SwiftCompile": 23.0, "SwiftExplicitDependencyGeneratePcm": 6.0,
+                                               "SwiftExplicitDependencyCompileModuleFromInterface": 2.0, "Ld": 1.0}}
+
+    def fake_run(self, jobs=None, log=None):
+        def fake(cmd, **kw):
+            if cmd[-1].endswith("/jobs"):
+                return ok(json.dumps(self.JOBS if jobs is None else jobs))
+            return ok(self.LOG if log is None else log)
+        return fake
+
+    def test_ci_metrics_from_jobs_and_log(self):
+        m = pr.ci_metrics(self.REPORT, "5", "o/r", run=self.fake_run())
+        self.assertEqual(m["build_step_s"], 376)
+        self.assertEqual(m["xcodebuild_start_s"], 263)
+        self.assertEqual(m["swift_compile_s"], 23.0)
+        self.assertEqual(m["system_modules_s"], 8.0)
+        self.assertAlmostEqual(m["ratio"], 23.0 / 8.0)
+        self.assertEqual(m["commit"], "abc1234")
+
+    def test_ci_metrics_zero_system_modules_ratio_null(self):
+        m = pr.ci_metrics({"commit": "c", "timing": {"SwiftCompile": 5.0}}, "5", "o/r", run=self.fake_run())
+        self.assertEqual(m["system_modules_s"], 0.0)
+        self.assertIsNone(m["ratio"])
+        self.assertEqual(m["swift_compile_s"], 5.0)
+
+    def test_ci_metrics_without_report_or_gh(self):
+        def failing(cmd, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="auth")
+        m = pr.ci_metrics(None, "5", "o/r", run=failing)
+        self.assertIsNone(m["swift_compile_s"])
+        self.assertIsNone(m["build_step_s"])
+        self.assertIsNone(m["xcodebuild_start_s"])
+
+    def test_ci_metrics_cli_writes_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "m", "build-metrics.json")
+            with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "o/r"}), \
+                    mock.patch.object(pr.subprocess, "run", self.fake_run()):
+                code = pr.main(["ci-metrics", "--report", os.path.join(d, "none.json"), "--run-id", "5", "--out", out])
+            self.assertEqual(code, 0)
+            with open(out) as f:
+                data = json.load(f)
+            self.assertIsNone(data["swift_compile_s"])
+            self.assertEqual(data["build_step_s"], 376)
+
+    def test_build_regression_ignores_null_compile_time(self):
+        base = [metric(100.0)] * 5
+        self.assertIsNone(pr.build_regression({"swift_compile_s": None, "ratio": None}, base))
+        self.assertIsNone(pr.build_regression({"ratio": None}, base))
+        bad = [metric(None), {"ratio": None}]
+        self.assertIsNone(pr.build_regression(metric(150.0), base[:4] + bad))  # 유효한 기준 4개
+        self.assertIsNotNone(pr.build_regression(metric(150.0), base + bad))  # 유효 5개, 무효는 건너뜀
+
+
 class GitHubTests(unittest.TestCase):
     def test_upsert_pr_comment_edits_marked_comment(self):
         calls = []

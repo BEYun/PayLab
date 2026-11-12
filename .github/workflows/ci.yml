@@ -34,12 +34,109 @@ jobs:
           UDID=$(xcrun simctl list devices available -j | jq -r '.devices["com.apple.CoreSimulator.SimRuntime.iOS-27-0"][] | select(.name == "iPhone 18 Pro") | .udid')
           xcrun simctl bootstatus "$UDID" -b  # 꺼진 시뮬레이터에서 첫 테스트가 실패하는 것 방지
           echo "DESTINATION=id=$UDID" >> "$GITHUB_ENV"
+          echo "UDID=$UDID" >> "$GITHUB_ENV"  # 성능 수집(perf-report collect)이 hang·크래시를 이 시뮬레이터로 거른다
+
+      - name: 측정 준비
+        run: |
+          mkdir -p .build
+          echo "PERF_SINCE=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"  # 이 시각 이후의 hang·크래시만 수집
 
       - name: 빌드
-        run: xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "$DESTINATION" -derivedDataPath .build/DerivedData build-for-testing
+        run: |
+          set -o pipefail
+          xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "$DESTINATION" -derivedDataPath .build/DerivedData -showBuildTimingSummary build-for-testing | tee .build/build.log
 
       - name: 테스트
         run: xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "$DESTINATION" -derivedDataPath .build/DerivedData test-without-building
+
+      - name: 성능 수집
+        if: always()  # 테스트가 실패해도 hang·크래시·느린 함수는 모은다
+        continue-on-error: true  # 수집 실패가 CI 결과를 바꾸지 않는다 (보고 잡은 보고서가 없어도 돈다)
+        run: |
+          LOGS=()
+          if [ -f .build/build.log ]; then LOGS=(--build-log .build/build.log); fi  # 빌드 전에 실패하면 로그가 없다
+          python3 -I scripts/perf-report.py collect --since "$PERF_SINCE" --device "$UDID" --products .build/DerivedData/Build/Products/Debug-iphonesimulator ${LOGS[@]+"${LOGS[@]}"} --out .build/perf/report.json
+
+      - name: 성능 보고서 올리기
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-report
+          path: .build/perf/report.json
+          if-no-files-found: ignore
+
+  perf-report:
+    needs: build-and-test
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event.pull_request.author_association == 'OWNER') }}  # 빌드·테스트가 실패해도 돈다. PR은 소유자만
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      actions: read  # 최근 main 실행의 build-metrics 받기
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PERF_PR_DRY_RUN: --dry-run  # 첫 PR에서는 gh에 쓰지 않는다. 기준을 확인한 뒤 이 줄과 아래 $PERF_PR_DRY_RUN을 지운다 (성능 계획 Task 9)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2  # PR 체크아웃은 병합 커밋이라 HEAD^1이 base
+
+      - name: 성능 보고서 받기
+        continue-on-error: true  # 빌드가 수집 전에 실패하면 artifact가 없다
+        uses: actions/download-artifact@v8
+        with:
+          name: perf-report
+          path: .build/perf
+
+      - name: 빌드 측정값
+        run: python3 -I scripts/perf-report.py ci-metrics --report .build/perf/report.json --run-id "${{ github.run_id }}" --out .build/perf/build-metrics.json
+
+      - name: 최근 main 측정값 받기
+        run: |
+          mkdir -p baseline
+          gh run list --workflow ci.yml --branch main --event push --status success --limit 10 --json databaseId --jq '.[].databaseId' \
+            | grep -vx "$GITHUB_RUN_ID" | head -n 5 \
+            | while read -r id; do
+                gh run download "$id" -n build-metrics -D "baseline/$id" || echo "run $id: build-metrics 없음"  # 없으면 넘어간다
+              done
+          true
+
+      - name: 보고 (PR)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 -I scripts/perf-report.py report --input .build/perf/report.json --where pr --pr "$PR_NUMBER" --changed-from HEAD^1 --baseline-dir baseline --metrics .build/perf/build-metrics.json $PERF_PR_DRY_RUN
+
+      - name: 보고 (main)
+        if: github.event_name == 'push'
+        run: python3 -I scripts/perf-report.py report --input .build/perf/report.json --where main --baseline-dir baseline --metrics .build/perf/build-metrics.json
+
+      - name: 측정값 요약
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "| 이름 | 값 |"
+            echo "|---|---|"
+            jq -r '"| 우리 코드 컴파일(초) | \(.swift_compile_s // "없음") |",
+                   "| 시스템 모듈 준비(초) | \(.system_modules_s // "없음") |",
+                   "| 정규화 값 | \(.ratio // "없음") |",
+                   "| xcodebuild 첫 출력까지(초) | \(.xcodebuild_start_s // "없음") |",
+                   "| 전체 빌드 단계(초) | \(.build_step_s // "없음") |"' .build/perf/build-metrics.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 측정값 유효 확인
+        id: valid
+        if: github.event_name == 'push'
+        run: echo "ok=$(jq -r '.swift_compile_s != null' .build/perf/build-metrics.json)" >> "$GITHUB_OUTPUT"  # 실패한 빌드는 기준이 되지 않는다
+
+      - name: 측정값 올리기 (main)
+        if: github.event_name == 'push' && steps.valid.outputs.ok == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-metrics
+          path: .build/perf/build-metrics.json
 
   claude-review:
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.pull_request.author_association == 'OWNER'  # PR 열기·다시 열기, 소유자 PR만

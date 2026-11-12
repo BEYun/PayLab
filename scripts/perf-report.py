@@ -4,6 +4,7 @@
           --products <제품 폴더> [--build-log <경로>]... --out <경로>
      python3 -I scripts/perf-report.py report --input <json> --where local|pr|main [--changed-from <ref> | --no-changes]
           [--pr <n>] [--baseline-dir <dir>] [--metrics <json>] [--dry-run]
+     python3 -I scripts/perf-report.py ci-metrics --report <json> --run-id <id> --out <json>
      python3 -I scripts/perf-report.py changed-swift
 바이너리 선택 규칙(find_binary): 제품 폴더 아래에서 파일 이름이 이미지 이름과 같은 일반 파일 중
   1) .xctest 번들 밖 우선, 2) 경로가 얕은 것 우선, 3) 경로 문자열 사전순."""
@@ -454,6 +455,9 @@ def median(values: List[float]) -> float:
 
 def build_regression(current: dict, baseline: List[dict], ratio: float = 0.30,
                      min_seconds: float = 10.0) -> Optional[dict]:
+    if current.get("swift_compile_s") is None:
+        return None
+    baseline = [m for m in baseline if m.get("swift_compile_s") is not None]
     if len(baseline) < 5:
         return None
     use_ratio = all(m.get("ratio") is not None for m in baseline + [current])
@@ -658,6 +662,64 @@ def load_baselines(directory: str) -> List[dict]:
     return found
 
 
+ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?Z")
+BUILD_JOB, BUILD_STEP = "build-and-test", "빌드"
+
+
+def parse_iso(text: str) -> Optional[datetime.datetime]:
+    m = ISO_RE.match(text or "")
+    if not m:
+        return None
+    t = datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")
+    return t + datetime.timedelta(seconds=float(m.group(2) or 0))
+
+
+def gh_text(run, *args: str) -> str:
+    result = run(["gh", "api"] + list(args), capture_output=True, text=True)
+    if result.returncode != 0:
+        raise GitHubError("gh api 실패")
+    return result.stdout
+
+
+def ci_metrics(report: Optional[dict], run_id: str, repo: str, run=subprocess.run) -> dict:
+    timing = (report or {}).get("timing") or {}
+    swift = timing.get("SwiftCompile")
+    system = round(sum(v for k, v in timing.items() if k.startswith("SwiftExplicitDependency")), 3)
+    metrics = {"commit": (report or {}).get("commit") or os.environ.get("GITHUB_SHA", "")[:7] or None,
+               "swift_compile_s": swift, "system_modules_s": system if timing else None,
+               "ratio": swift / system if swift is not None and system > 0 else None,
+               "xcodebuild_start_s": None, "build_step_s": None}
+    try:
+        jobs = json.loads(gh_text(run, "repos/%s/actions/runs/%s/jobs" % (repo, run_id)))["jobs"]
+        job = next(j for j in jobs if j.get("name") == BUILD_JOB)
+        step = next(s for s in job["steps"] if s.get("name") == BUILD_STEP)
+        start, end = parse_iso(step.get("started_at")), parse_iso(step.get("completed_at"))
+        if start and end:
+            metrics["build_step_s"] = round((end - start).total_seconds())
+        log = gh_text(run, "--allow-escape-sequences", "repos/%s/actions/jobs/%s/logs" % (repo, job["id"]))
+        for line in log.splitlines():
+            when = parse_iso(line)
+            if start and when and when >= start and "Command line invocation" in line:
+                metrics["xcodebuild_start_s"] = round((when - start).total_seconds())
+                break
+    except (GitHubError, ValueError, KeyError, StopIteration, OSError) as e:
+        print("경고: CI 단계 시간을 못 구함: %s" % type(e).__name__, file=sys.stderr)
+    return metrics
+
+
+def run_ci_metrics(args) -> int:
+    report = None
+    if os.path.exists(args.report):
+        with open(args.report) as f:
+            report = json.load(f)
+    metrics = ci_metrics(report, args.run_id, os.environ.get("GITHUB_REPOSITORY", ""), run=subprocess.run)
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, "w") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    print(json.dumps(metrics, ensure_ascii=False))
+    return 0
+
+
 def run_report(args) -> int:
     if not os.path.exists(args.input):
         print("보고서 없음")
@@ -712,12 +774,18 @@ def main(argv: List[str]) -> int:
     r.add_argument("--baseline-dir")
     r.add_argument("--metrics")
     r.add_argument("--dry-run", action="store_true", help="gh를 호출하지 않고 할 일만 출력")
+    m = sub.add_parser("ci-metrics", help="CI 빌드 측정값(build-metrics.json)을 만든다")
+    m.add_argument("--report", required=True)
+    m.add_argument("--run-id", required=True)
+    m.add_argument("--out", required=True)
     sub.add_parser("changed-swift", help="merge-base 이후 변경된 .swift 파일을 줄마다 출력")
     args = parser.parse_args(argv)
     if args.command == "report":
         if args.where == "pr" and not args.changed_from and not args.no_changes:
             parser.error("--where pr 에는 --changed-from 또는 --no-changes가 필요함")
         return run_report(args)
+    if args.command == "ci-metrics":
+        return run_ci_metrics(args)
     if args.command == "changed-swift":
         return run_changed_swift()
     repo_root = REPO_ROOT
