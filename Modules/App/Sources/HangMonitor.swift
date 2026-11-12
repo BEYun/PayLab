@@ -78,27 +78,30 @@ final class HangMonitor: Sendable {
     }
 
     /// 메인 스레드를 멈추고 pc, lr, 프레임 포인터 체인의 복귀 주소를 읽는다.
-    /// 멈춘 동안에는 메모리를 할당하지 않는다. 메인이 malloc 잠금을 쥔 채 멈췄을 수 있다.
+    /// 멈춘 동안에는 미리 준비한 메모리·값만 쓰고 Swift 런타임(메타데이터·제네릭·지연 초기화)과 malloc을 부르지 않는다.
+    /// 메인이 그 잠금을 쥔 채 멈췄다면 감시 스레드가 영원히 기다려 메인을 풀지 못한다.
+    /// Debug(-Onone) 기계어에서 thread_suspend와 thread_resume 사이 호출을 `otool -tV`로 확인한다.
     private static func mainStackAddresses(mainThread: thread_act_t, stack: Range<UInt>) -> [UInt] {
         #if arch(arm64)
         let addressMask: UInt = 0x0000_7FFF_FFFF_FFFF  // 포인터 인증·async 프레임 표시 비트를 지운다
-        var addresses = [UInt](repeating: 0, count: maxFrames)
+        let capacity = maxFrames
+        let (stackLow, stackHigh) = (stack.lowerBound, stack.upperBound)
+        let addresses = UnsafeMutablePointer<UInt>.allocate(capacity: capacity)
+        defer { addresses.deallocate() }
+        let state = UnsafeMutablePointer<arm_thread_state64_t>.allocate(capacity: 1)
+        defer { state.deallocate() }
+        let stateWords = UnsafeMutableRawPointer(state).assumingMemoryBound(to: natural_t.self)
+        var stateCount = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size)
+        let flavor = thread_state_flavor_t(ARM_THREAD_STATE64)
         var count = 0
         guard thread_suspend(mainThread) == KERN_SUCCESS else { return [] }
-        var state = arm_thread_state64_t()
-        var stateCount = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size)
-        let result = withUnsafeMutablePointer(to: &state) {
-            $0.withMemoryRebound(to: natural_t.self, capacity: Int(stateCount)) {
-                thread_get_state(mainThread, thread_state_flavor_t(ARM_THREAD_STATE64), $0, &stateCount)
-            }
-        }
-        if result == KERN_SUCCESS {
-            addresses[0] = UInt(state.__pc) & addressMask
-            addresses[1] = UInt(state.__lr) & addressMask
+        if thread_get_state(mainThread, flavor, stateWords, &stateCount) == KERN_SUCCESS {
+            addresses[0] = UInt(state.pointee.__pc) & addressMask
+            addresses[1] = UInt(state.pointee.__lr) & addressMask
             count = 2
-            var fp = UInt(state.__fp) & addressMask
-            while count < maxFrames, fp % 8 == 0, stack.contains(fp), stack.contains(fp + 15) {
-                let record = UnsafePointer<UInt>(bitPattern: fp)!  // [0] 바깥 프레임 fp, [1] 복귀 주소
+            var fp = UInt(state.pointee.__fp) & addressMask
+            while count < capacity, fp % 8 == 0, fp >= stackLow, fp + 16 <= stackHigh,
+                  let record = UnsafePointer<UInt>(bitPattern: fp) {  // [0] 바깥 프레임 fp, [1] 복귀 주소
                 let returnAddress = record[1] & addressMask
                 if returnAddress == 0 { break }
                 addresses[count] = returnAddress
@@ -109,7 +112,7 @@ final class HangMonitor: Sendable {
             }
         }
         thread_resume(mainThread)
-        return Array(addresses.prefix(count))
+        return Array(UnsafeBufferPointer(start: addresses, count: count))
         #else
         return []
         #endif
