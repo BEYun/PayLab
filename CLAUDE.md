@@ -53,9 +53,11 @@ xcrun simctl launch --terminate-running-process "PayLab-$(git branch --show-curr
 | `app` | `launch failTransfers=<bool>` |
 | `network` | `request <메서드> /<경로>` · `response <상태> <메서드> /<경로> <ms>ms <바이트>B` · `body <메서드> /<경로> <원문>`(DEBUG 빌드만) · `decode failed <타입> <메서드> /<경로>: <종류>(<타입·키>) at <필드 경로>: <설명>` + 원문 `body` (예: `typeMismatch(Int) at [0].balance`, `keyNotFound(transferID) at <root>`) · `transport failed …` |
 | `home` | `load start` · `load ok accounts=<n>` · `load failed keep=<n>: <오류>` |
+| `hang` | `hang id=<id> duration=<ms>ms frames=<n>` · `hang frame id=<id> #<i> <이미지> 0x<주소> base=0x<로드 주소> <심볼\|?>` (Debug 빌드, 메인 스레드가 250ms 이상 막힐 때 한 번) |
+| `history` | `load start account=<id>` · `load ok account=<id> count=<n> sections=<m>` · `load failed account=<id>: <오류>` |
 | `transfer` | `recipients start/ok count=<n>/failed` · `select recipient=<id>` · `confirm amount=<n>` / `confirm blocked amountText=… amount=… balance=…` · `submit start key=<키> …` · `submit ok` / `submit ok unreadable` / `submit rejected status=<n>` / `submit retry attempt=<n> after=<ms>ms: <오류>` / `submit check after attempts=<n>` · `submit check start/ok/notFound` / `submit check ok unreadable` / `submit unknown key=…: <오류>` · `submit ignored inFlight/done` / `submit ignored recipient=… amount=… key=…` · `confirm ignored inFlight/done` |
 
-- 레벨: debug = 요청·원문·시작, info = 성공, error = 실패·`blocked`·`ignored`·비 2xx 응답.
+- 레벨: debug = 요청·원문·시작, info = 성공, error = 실패·`blocked`·`ignored`·비 2xx 응답·`hang`.
 - `body` 원문 길이가 `response` 줄의 바이트 수보다 짧으면 로그에서 잘린 것이다.
 - 로그가 없는 곳: 뷰(SwiftUI `body`), `FakeServer` 내부. 이쪽 문제는 "모델 로그 정상 + 화면 이상"으로 드러난다.
 
@@ -171,7 +173,7 @@ gh run view <run-id> --log-failed  # 실패한 단계 로그만
 xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test -only-testing:DomainTests   # 단위: 모듈 하나 (타깃 이름 교체)
 xcodebuild -workspace PayLab.xcworkspace -scheme PayLab -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test   # 단위 + 통합 (공용 PayLab 스킴, CI도 이것만)
 xcodebuild -workspace PayLab.xcworkspace -scheme PayLabUITests -destination "platform=iOS Simulator,name=PayLab-$(git branch --show-current)" -derivedDataPath .build/DerivedData test   # UI
-scripts/test-all.sh   # 전체: 생성 → 시뮬레이터 → 단위·통합(커버리지) → UI → hook 테스트. 마지막 줄 ALL TESTS PASSED
+scripts/test-all.sh   # 전체: 생성 → 시뮬레이터 → 단위·통합(커버리지) → UI(커버리지) → hook 테스트 → perf-report 테스트 → (끝에서) 성능 수집·판정. 이번 변경의 성능 문제가 있으면 실패. 마지막 줄 ALL TESTS PASSED
 ```
 
 ### 테스트 위치
@@ -203,22 +205,25 @@ scripts/test-all.sh   # 전체: 생성 → 시뮬레이터 → 단위·통합(�
 xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # scripts/test-all.sh 실행 후
 ```
 
-기준선 (2026-11-10, PayLab 스킴 단위·통합, UI 테스트 제외):
+기준선 (2026-11-10, PayLab 스킴 단위·통합, UI 테스트 제외). 2026-11-12 열은 이 브랜치(거래 내역·hang 감시자)가 바꾼 모듈만 다시 쟀다:
 
-| 모듈 | 커버리지 | 메모 |
-|---|---|---|
-| Domain | 100% (26/26) | |
-| DataKit | 97.33% (146/150) | |
-| HomeFeature | 99.23% (129/130) | 테스트 호스트 앱이 홈 화면을 그려 뷰 코드까지 잡힘. `HomeModel` 100% |
-| TransferFeature | 15.54% (39/251) | 뷰 코드 0%. `TransferModel` 100% |
-| DesignSystem | 14.29% (4/28) | `formatWon` 100%, `PrimaryButton` 0% |
-| PayLab (App) | 74.29% (26/35) | `AppEnvironment` 100% |
+| 모듈 | 커버리지 | 2026-11-12 | 메모 |
+|---|---|---|---|
+| Domain | 100% (26/26) | 100% (32/32) | |
+| DataKit | 97.33% (146/150) | 94.25% (295/313) | |
+| HomeFeature | 99.23% (129/130) | 66.12% (203/307) | 테스트 호스트 앱이 홈 화면을 그려 뷰 코드까지 잡힘. `HomeModel` 100% |
+| TransferFeature | 15.54% (39/251) | | 뷰 코드 0%. `TransferModel` 100% |
+| DesignSystem | 14.29% (4/28) | | `formatWon` 100%, `PrimaryButton` 0% |
+| PayLab (App) | 74.29% (26/35) | 89.19% (132/148) | `AppEnvironment` 100% |
 
 - 낮은 수치는 대부분 SwiftUI 뷰다. 로직 파일(`*Model`, `RemoteBankingRepository`, `AppEnvironment`, `formatWon`)이 100%에서 떨어지면 빠진 테스트를 찾는다.
 
 ### 테스트 개수 (2026-11-11)
 - Swift Testing 59개(매개변수 테스트는 1개로 셈) + UI 테스트 3개 + hook 테스트 14개.
 - 위 "현재 6개"는 기반 단계 기준이다.
+
+### 테스트 개수 (2026-11-12)
+- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 68개(`scripts/test_perf_report.py`, `unittest`).
 
 ## 트랜잭션 (송금 정합성)
 
@@ -262,3 +267,72 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 - 서버 계약: `FakeServerTests`(키·재요청·422·조회·실패 주입), `RemoteBankingRepositoryTests`(헤더 전송, 404 → nil, `URLError`·`DecodingError`).
 - 모델: `TransferModelTests` — 가짜 저장소 응답은 `StubBankingRepository.Reply`, 재시도 대기는 `retryDelays: [.zero, .zero]`. 연타·송금 중 재현은 `holdFirstTransfer` + `waitUntilHeld()`/`release()`.
 - 통합: `AppIntegrationTests`(실패 주입 4가지 각각 화면 상태와 홈 잔액). UI: `TransferFlowUITests`(실패 → 로딩 → 보내지 않았어요, 응답 유실 → 로딩 → 보냈어요).
+
+## 성능 (hang·크래시·느린 빌드 자동 수집)
+
+설계: docs/superpowers/specs/2026-11-11-performance-design.md
+
+목표: 테스트·빌드 중 생긴 성능 문제를 자동으로 찾아 기록한다. 문제 하나 = GitHub 이슈 하나. 고치는 건 사람이다.
+- **기존 문제**(이번 변경과 무관) → 공개 이슈.
+- **이번 변경의 문제** → 이슈 없음. 로컬은 커밋 차단, PR은 코멘트. 그 작업 안에서 고친다.
+
+### 문제 종류와 기준
+| 종류 | 감지 | 비정상 기준 | 어디서 |
+|---|---|---|---|
+| `crash` | 시뮬레이터 `PayLab-*.ips` (UDID·시작 시각으로 거름) | PayLab 프로세스 크래시 | 로컬, CI |
+| `hang` | 앱 안 `HangMonitor`(`Modules/App/Sources/HangMonitor.swift`, Debug 전용) → `hang` 로그 | 메인 스레드 **250ms 이상** 응답 없음 | 로컬, CI |
+| `slow-build` 느린 함수 | Debug 빌드 플래그 `-warn-long-function-bodies=100` `-warn-long-expression-type-checking=100` | 타입 검사 **100ms 초과** | 로컬(변경 파일만), CI |
+| `slow-build` 컴파일 시간 | CI `-showBuildTimingSummary` | 우리 코드 컴파일이 main 최근 5회 중앙값보다 **30% 이상, 10초 이상** 늘어남. 기준 5회 미만이면 판정 안 함 | CI만 |
+
+- hang `duration`은 하한이다. 실제보다 최대 약 50ms 짧게 찍힌다.
+- UI 테스트는 앱을 띄울 때마다 약 1.3초 시스템 hang(UIKit 접근성 초기화)을 만든다. 스택에 우리 코드가 진입점뿐인 hang은 무시하고 `report.json`의 `ignored_hangs`에만 센다(`test-all.sh` 한 번에 보통 4).
+- "우리 코드" = 기호화한 파일이 저장소 안인 프레임. 컴파일러가 만든 진입점(`main`, `PayLabApp.$main()`)은 뺀다.
+
+### 판정: 이번 변경 vs 기존
+- 위치 파일: crash·hang은 스택의 **모든** 우리 코드 프레임 파일, 느린 함수는 경고가 가리킨 파일. 컴파일 시간은 파일 없음(PR = 이번 변경, main = 기존).
+- 위치 파일 중 하나라도 변경 파일이면 "이번 변경", 아니면 "기존". 스택에 우리 코드가 없는 크래시는 "기존".
+- 변경 파일: 로컬 = `origin/main` merge-base 이후 커밋 + 스테이징 + 미스테이징 + 새 파일(`git fetch` 안 함). PR = `--changed-from HEAD^1`. main push = 판정 없음(모두 기존).
+- 변경 파일을 알 수 없으면 전부 "이번 변경"으로 본다.
+- 로컬은 변경된 Swift 파일의 느린 함수만 본다. `test-all.sh`가 빌드 전에 그 파일을 `touch`해 다시 컴파일시킨다. 기존 느린 함수는 CI가 잡는다.
+- 한계: 스택에 남지 않는 방식(예: 데이터 양만 늘림)은 "기존"으로 잘못 판정된다. 이슈의 브랜치·커밋을 보고 닫는다.
+
+### 이슈 (공개)
+- 라벨: `perf-auto` + `crash`/`hang`/`slow-build` 중 하나. 없으면 만든다.
+- 제목: `[hang] HistoryModel.makeSections(_:) 714ms`. 본문: 수치, 처음 발견한 곳(로컬/CI, 브랜치, 커밋, CI 실행), 재현 단서(직전 앱 로그), 우리 코드 스택(파일:줄), 숨은 서명, 발생 기록.
+- 서명 `<!-- perf-signature: … -->`: crash = 예외 종류 + 가장 안쪽 우리 함수, hang = 가장 안쪽 우리 함수, 느린 함수 = 파일 + 함수(줄 번호 없음), 컴파일 시간 = 고정 하나.
+- 같은 서명의 **열린** 이슈가 있으면 새로 만들지 않고 본문의 발생 기록(`<!-- perf-occurrences:start/end -->`: 횟수, 마지막 발견, 최근 발견한 곳)만 고친다. 코멘트는 달지 않는다.
+- 같은 서명의 **닫힌** 이슈만 있으면: CI는 이전 이슈를 링크한 새 이슈를 만들고, 로컬은 출력만 한다(오래된 브랜치가 이미 고친 문제로 가짜 재발 이슈를 만들지 않게).
+- 올리기 전 홈 경로(`~`), UDID, 컴퓨터 이름, 메일, 토큰 모양 문자열을 지운다. 이슈를 만든 뒤 `gh issue view <번호> --json body`로 본문을 읽어 확인한다.
+- `gh` 실패 시 로컬은 경고만 하고 넘어간다.
+
+### 로컬
+`scripts/test-all.sh`는 끝에서(테스트 성공·실패 무관) `collect` → `report --where local`을 돈다. 이번 변경의 hang·느린 함수가 있으면 `실패: 이번 변경의 성능 문제`로 끝나 커밋이 막힌다.
+- 읽는 곳: 출력의 `[이번 변경] [hang] <함수> <ms> <파일:줄>` 줄, `.build/perf/report.json`(`problems`, `ignored_hangs`, `warnings`).
+- `report` 종료 코드: 0 정상(기존 문제만 있거나 없음), 1 이번 변경 있음, 2 사용 오류. `collect`는 시뮬레이터 로그·products 디렉터리를 못 읽으면 2.
+- 기존 문제는 자동으로 이슈가 된다(`gh` 필요). 차단하지 않는다.
+- 막히면 그 문제를 고친다. 이슈로 돌리려고 우회하지 않는다.
+
+시뮬레이터 확인(Claude) 뒤에는 확인을 시작한 시각부터의 hang·크래시를 같은 스크립트로 처리한다:
+```bash
+SIM="PayLab-$(git branch --show-current)"; UDID=$(xcrun simctl list devices | grep -F "$SIM (" | grep -oE '[0-9A-F-]{36}' | head -n 1)
+START=$(date '+%Y-%m-%d %H:%M:%S')   # 확인을 시작할 때 기록
+# …앱 설치·실행·탭…
+python3 -I scripts/perf-report.py collect --since "$START" --device "$UDID" --products .build/DerivedData/Build/Products/Debug-iphonesimulator --out .build/perf/report.json
+python3 -I scripts/perf-report.py report --input .build/perf/report.json --where local   # 이번 변경이면 [이번 변경] 줄 + 종료 1
+```
+- 기호화는 `.build/DerivedData`의 마지막 빌드 바이너리로 한다. 확인한 앱과 같은 빌드여야 한다. `--build-log`를 빼면 느린 함수 경고는 수집하지 않는다.
+- `report`에 `--dry-run`을 붙이면 `gh`를 부르지 않고 할 일만 출력한다. `--no-changes`는 변경 파일 없음으로 본다(시연·테스트용).
+
+### CI
+- `build-and-test`: `build-for-testing`에 타이밍 요약을 켜고, 테스트 뒤(실패해도) `collect`를 돌려 artifact `perf-report`(`report.json`)를 올린다. 권한은 읽기만.
+- `perf-report` 잡(ubuntu, `issues`·`pull-requests` 쓰기): 빌드가 실패해도 돈다. 취소되면 안 돈다. 소유자 PR과 main push에서만 돈다.
+  1. `ci-metrics` → `build-metrics.json` (우리 코드 컴파일, 시스템 모듈 준비, 정규화 값, `xcodebuild` 첫 출력까지, 전체 빌드 단계).
+  2. 최근 main 실행 최대 5개의 `build-metrics` artifact를 기준으로 내려받는다.
+  3. PR → `report --where pr`(이번 변경은 PR 코멘트 하나를 고쳐 씀, 기존은 이슈). main → `report --where main`(전부 이슈).
+  4. 측정값 표를 잡 요약(Job Summary)에 쓴다. main이면 `build-metrics`를 artifact로 올린다.
+- 현재 PR 보고는 `ci.yml`의 `PERF_PR_DRY_RUN`으로 `--dry-run`이다. 이 줄을 지워야 PR 코멘트·이슈가 실제로 생긴다.
+- report.json이 없으면(빌드가 수집 전에 실패) `::warning::`만 낸다.
+- 측정값 보기: `gh run view <run-id>`의 요약, `gh run download <run-id> -n perf-report`.
+
+### 이슈를 받았을 때
+이슈의 우리 코드 스택(함수, 파일:줄)에서 시작해 `## 디버깅`의 "멈춤"(hang)·"메인 스레드 위반·크래시"(crash) 절차로 원인을 조사한다. 고친 뒤 `scripts/test-all.sh`가 통과하고, PR이 이슈를 닫는다.
