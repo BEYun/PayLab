@@ -8,7 +8,7 @@ final class HistoryUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.staticTexts["1,250,000원"].waitForExistence(timeout: 5))
-        app.staticTexts["PayLab 통장"].tap()
+        app.buttons["PayLab 통장"].tap()  // 계좌 이름은 버튼 특성 (VoiceOver), 잔액은 글자 그대로
         XCTAssertTrue(app.navigationBars["거래 내역"].waitForExistence(timeout: 5))
         // 가장 최근 거래: 11월 1일 09:00 편의점 (가짜 서버 기준 시각)
         XCTAssertTrue(app.staticTexts["11월 1일 일요일"].waitForExistence(timeout: 10))

@@ -13,6 +13,8 @@ struct AccountRow: View {
                 Text(account.name)
                     .font(PayFont.body)
                     .foregroundStyle(PayColor.textPrimary)
+                    .accessibilityAddTraits(.isButton)  // 이름만 버튼. 번호·잔액은 글자로 둔다
+                    .accessibilityHint("거래 내역 보기")
                 Text(account.maskedNumber)
                     .font(PayFont.caption)
                     .foregroundStyle(PayColor.textSecondary)

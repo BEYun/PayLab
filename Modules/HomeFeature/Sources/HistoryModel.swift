@@ -32,7 +32,7 @@ public final class HistoryModel {
         self.repository = repository
     }
 
-    /// fetchTransactions 성공 시 sections 교체. 실패 시 기존 sections 유지, loadFailed = true.
+    /// fetchTransactions 성공 시 sections 교체, loadFailed = false. 실패 시 기존 sections 유지, loadFailed = true.
     public func load() async {
         isLoading = true
         defer { isLoading = false }
@@ -40,6 +40,7 @@ public final class HistoryModel {
         do {
             let transactions = try await repository.fetchTransactions(accountID: account.id)
             sections = await Self.makeSections(transactions)
+            loadFailed = false
             log.info("load ok account=\(self.account.id, privacy: .public) count=\(transactions.count, privacy: .public) sections=\(self.sections.count, privacy: .public)")
         } catch {
             loadFailed = true

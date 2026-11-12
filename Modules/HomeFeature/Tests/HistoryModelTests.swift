@@ -53,6 +53,17 @@ struct HistoryModelTests {
         #expect(model.isLoading == false)
     }
 
+    @Test func loadSuccessAfterFailureClearsError() async {
+        let repository = StubBankingRepository(accounts: .success([]), transactions: .failure(.server(statusCode: 500)))
+        let model = HistoryModel(account: account, repository: repository)
+        await model.load()
+        #expect(model.loadFailed == true)
+        repository.setTransactions(.success(transactions))
+        await model.load()
+        #expect(model.loadFailed == false)
+        #expect(model.sections.count == 2)
+    }
+
     @Test func homeMakesHistoryModelWithSameRepository() async {
         let home = HomeModel(repository: StubBankingRepository(
             accounts: .success([account]), transactions: .success(transactions)))
