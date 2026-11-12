@@ -37,6 +37,7 @@ final class HangMonitor: Sendable {
         let stack = (stackTop - UInt(pthread_get_stacksize_np(pthread_self())))..<stackTop
         let watcher = Thread { [self] in watch(mainThread: mainThread, stack: stack) }
         watcher.name = "HangMonitor"
+        watcher.qualityOfService = .userInteractive  // 늦게 깨면 hang을 놓치거나 지속 시간이 짧게 찍힌다
         watcher.start()
     }
 

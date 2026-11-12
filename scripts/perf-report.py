@@ -29,7 +29,9 @@ HANG_RE = re.compile(r"^hang id=(\d+) duration=(\d+)ms frames=\d+$")
 HANG_FRAME_RE = re.compile(r"^hang frame id=(\d+) #\d+ (\S+) 0x([0-9a-f]+) base=0x([0-9a-f]+) (.*)$")
 SLOW_RE = re.compile(r"^(.+?):(\d+):\d+: warning: (.+?) took (\d+)ms to type-check \(limit: \d+ms\)")
 TIMING_RE = re.compile(r"^\s*(\S.*?) \(\d+ tasks?\) \| ([\d.]+) seconds")
-TIME_FORMATS = ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z")
+TIME_FORMATS = ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S.%f%z")  # 마지막은 log show ndjson
+TOOL_TIMEOUT = 120  # dsymutil·atos 한 번 (초). hook 전체 예산은 600초
+GH_TIMEOUT = 60  # gh 한 번 (초)
 
 
 class CollectError(Exception):
@@ -40,7 +42,7 @@ ATOS_RE = re.compile(r"^(.*?) \(in .*?\)(?: \((.+):(\d+)\))?(?: \+ \d+)?$")
 
 
 def parse_time(text: str) -> datetime.datetime:
-    """오프셋이 있는 리포트 시각 -> aware datetime."""
+    """오프셋이 있는 리포트·로그 시각 -> aware datetime."""
     for fmt in TIME_FORMATS:
         try:
             return datetime.datetime.strptime(text, fmt)
@@ -148,51 +150,55 @@ def repo_relative(path: Optional[str], repo_root: str) -> Optional[str]:
     return os.path.relpath(path, root) if path.startswith(root + os.sep) else None
 
 
-def run_checked(run, cmd: List[str], what: str, warnings: Optional[List[str]]):
-    """실행 실패(없는 명령·비 0 종료)는 warnings에 남기고 None."""
+def run_checked(run, cmd: List[str], what: str, failures: Optional[List[str]]):
+    """실행 실패(없는 명령·비 0 종료·시간 초과)는 failures에 남기고 None."""
     try:
-        result = run(cmd, capture_output=True, text=True)
+        result = run(cmd, capture_output=True, text=True, timeout=TOOL_TIMEOUT)
     except OSError as e:
         result = None
         reason = str(e)
+    except subprocess.TimeoutExpired:
+        result = None
+        reason = "%d초 초과" % TOOL_TIMEOUT
     else:
         reason = "exit %s" % result.returncode
         if result.returncode == 0:
             return result
-    if warnings is not None and what not in warnings:
-        warnings.append("%s 실패 (%s)" % (what, reason))
+    if failures is not None and what not in failures:
+        failures.append("%s 실패 (%s)" % (what, reason))
     return None
 
 
-def ensure_dwarf(binary: str, dsym_dir: str, run, warnings: Optional[List[str]] = None) -> Optional[str]:
+def ensure_dwarf(binary: str, dsym_dir: str, run, failures: Optional[List[str]] = None) -> Optional[str]:
     name = os.path.basename(binary)
     dsym = os.path.join(dsym_dir, name + ".dSYM")
     dwarf = os.path.join(dsym, "Contents", "Resources", "DWARF", name)
     if os.path.exists(dwarf):
         return dwarf
-    result = run_checked(run, ["xcrun", "dsymutil", binary, "-o", dsym], "dsymutil " + name, warnings)
+    result = run_checked(run, ["xcrun", "dsymutil", binary, "-o", dsym], "dsymutil " + name, failures)
     return dwarf if result else None
 
 
 def symbolize(frames: List[dict], products_dir: str, repo_root: str, run=subprocess.run,
-              dsym_dir: Optional[str] = None, warnings: Optional[List[str]] = None) -> List[dict]:
-    """frames는 스택 하나(첫 프레임 = pc). #1 이상은 복귀 주소라 address - 1을 조회한다."""
+              dsym_dir: Optional[str] = None, failures: Optional[List[str]] = None) -> List[dict]:
+    """frames는 스택 하나(첫 프레임 = pc). #1 이상은 복귀 주소라 address - 1을 조회한다.
+    dsymutil·atos가 실패한 이미지는 기호화하지 않고 failures에 남긴다(collect는 이것을 수집 실패로 본다)."""
     out = [dict(f, file=repo_relative(f.get("file"), repo_root)) for f in frames]
     if dsym_dir is None:
         with tempfile.TemporaryDirectory() as tmp:
-            return symbolize(frames, products_dir, repo_root, run, tmp, warnings)
+            return symbolize(frames, products_dir, repo_root, run, tmp, failures)
     groups = collections.OrderedDict()  # (image, base) -> [프레임 위치]
     for i, f in enumerate(frames):
         if f["image"] != "?":
             groups.setdefault((f["image"], f["base"]), []).append(i)
     for (image, base), positions in groups.items():
         binary = find_binary(products_dir, image)
-        dwarf = ensure_dwarf(binary, dsym_dir, run, warnings) if binary else None
+        dwarf = ensure_dwarf(binary, dsym_dir, run, failures) if binary else None
         if not dwarf:
             continue
         addresses = [frames[i]["address"] - (1 if i > 0 else 0) for i in positions]
         result = run_checked(run, ["xcrun", "atos", "-fullPath", "-o", dwarf, "-l", hex(base)]
-                             + [hex(a) for a in addresses], "atos " + image, warnings)
+                             + [hex(a) for a in addresses], "atos " + image, failures)
         if not result:
             continue
         for i, line in zip(positions, result.stdout.splitlines()):
@@ -217,13 +223,29 @@ def frame_files(frames: List[dict]) -> List[str]:
     return files
 
 
-def git_output(run, repo_root: str, *args: str) -> str:
+def git_output(run, repo_root: str, *args: str, default: str = "unknown") -> str:
     result = run(["git", "-C", repo_root] + list(args), capture_output=True, text=True)
-    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "unknown"
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else default
+
+
+def mark_stale_binary(problem: dict, products_dir: str, warnings: List[str]) -> dict:
+    """기호화에 쓴 바이너리가 문제가 난 뒤에 바뀌었으면(다시 빌드) "stale_binary": true와 경고를 남긴다.
+    그 바이너리로 찾은 함수·파일은 틀릴 수 있다. report는 이 문제를 이슈로 올리지 않는다."""
+    when = parse_time(problem["time"]).timestamp()
+    for image in collections.OrderedDict.fromkeys(f["image"] for f in problem["frames"] if f["image"] != "?"):
+        binary = find_binary(products_dir, image)
+        if binary and os.path.getmtime(binary) > when:
+            problem["stale_binary"] = True
+            warning = "%s 바이너리가 %s(%s) 뒤에 바뀜: 기호화가 틀릴 수 있어 이번 변경으로 봄" % (
+                image, problem["kind"], problem["time"])
+            if warning not in warnings:
+                warnings.append(warning)
+    return problem
 
 
 def collect(since: str, device: str, products_dir: str, build_logs: List[str], repo_root: str,
-            run=subprocess.run, crash_dir: Optional[str] = None) -> dict:
+            run=subprocess.run, crash_dir: Optional[str] = None, env=None) -> dict:
+    env = os.environ if env is None else env
     since_at = parse_since(since)
     if not os.path.isdir(products_dir):
         raise CollectError("--products 폴더가 없음: %s" % products_dir)
@@ -234,7 +256,11 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
         raise CollectError("log show 실패 (exit %s): %s" % (log.returncode, (log.stderr or "").strip()))
     with tempfile.TemporaryDirectory() as dsym_dir:
         def sym(frames):
-            return symbolize(frames, products_dir, repo_root, run, dsym_dir, warnings)
+            failures = []
+            out = symbolize(frames, products_dir, repo_root, run, dsym_dir, failures)
+            if failures:  # 기호화가 안 되면 우리 코드 hang이 "무시"로, 크래시가 "앱 프레임 없음"으로 보인다
+                raise CollectError("기호화 실패: %s" % "; ".join(failures))
+            return out
 
         for hang in parse_hang_log(log.stdout.splitlines()):
             frames = sym(hang["frames"])
@@ -242,8 +268,9 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
             if not files:
                 ignored += 1
                 continue
-            problems.append({"kind": "hang", "duration_ms": hang["duration_ms"], "time": hang["time"],
-                             "frames": frames, "files": files, "context": hang["context"]})
+            problem = {"kind": "hang", "duration_ms": hang["duration_ms"], "time": hang["time"],
+                       "frames": frames, "files": files, "context": hang["context"]}
+            problems.append(mark_stale_binary(problem, products_dir, warnings))
         pattern = os.path.join(crash_dir, "PayLab-*.ips") if crash_dir else os.path.expanduser(CRASH_GLOB)
         for path in sorted(glob.glob(pattern)):
             try:
@@ -259,8 +286,9 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
                 warnings.append("크래시 리포트 건너뜀 %s: %s %s" % (os.path.basename(path), type(e).__name__, e))
                 continue
             frames = sym(crash["frames"])
-            problems.append({"kind": "crash", "exception": crash["exception"], "message": crash["message"],
-                             "time": crash["time"], "frames": frames, "files": frame_files(frames), "context": []})
+            problem = {"kind": "crash", "exception": crash["exception"], "message": crash["message"],
+                       "time": crash["time"], "frames": frames, "files": frame_files(frames), "context": []}
+            problems.append(mark_stale_binary(problem, products_dir, warnings))
     timing, slow_seen = {}, set()
     for path in build_logs:
         with open(path, errors="replace") as f:
@@ -275,7 +303,8 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
                 problems.append({"kind": "slow-function", "name": slow["name"], "file": rel, "line": slow["line"],
                                  "ms": slow["ms"], "files": [rel]})
     return {"version": 1, "commit": git_output(run, repo_root, "rev-parse", "HEAD"),
-            "branch": git_output(run, repo_root, "branch", "--show-current"),
+            "branch": git_output(run, repo_root, "branch", "--show-current",  # CI PR은 분리된 HEAD라 비어 있다
+                                 default=env.get("GITHUB_HEAD_REF") or env.get("GITHUB_REF_NAME") or "unknown"),
             "problems": problems, "ignored_hangs": ignored, "timing": timing, "warnings": warnings}
 
 
@@ -329,12 +358,21 @@ def innermost_function(problem: dict) -> Optional[str]:
     return None
 
 
+def innermost_symbol(problem: dict) -> Optional[str]:
+    """가장 안쪽 기호화된 프레임의 함수(없으면 기호). 앱 프레임이 없는 크래시끼리 서명을 가른다."""
+    for f in problem.get("frames", []):
+        if f.get("function") or f.get("symbol"):
+            return f.get("function") or f.get("symbol")
+    return None
+
+
 def signature(problem: dict) -> str:
     kind = problem["kind"]
     if kind == "hang":
         return "hang|%s" % innermost_function(problem)
     if kind == "crash":
-        return "crash|%s|%s" % (problem.get("exception"), innermost_function(problem) or "-")
+        return "crash|%s|%s" % (problem.get("exception"),
+                                innermost_function(problem) or innermost_symbol(problem) or "-")
     if kind == "slow-function":
         return "slow-function|%s|%s" % (problem["file"], problem["name"])
     return "build-time"
@@ -381,8 +419,14 @@ def location(problem: dict) -> str:
     return ""
 
 
+def code_span(text: str) -> str:
+    """`…`로 감싼다(코드 안에서는 @멘션이 먹지 않는다). 안의 백틱은 지운다. 빈 문자열은 그대로."""
+    text = (text or "").replace("`", "")
+    return "`%s`" % text if text else ""
+
+
 def found_line(found: dict) -> str:
-    return " · ".join(x for x in (found["where"], found["branch"], found["commit"]) if x)
+    return " · ".join(x for x in (found["where"], code_span(found["branch"]), found["commit"]) if x)
 
 
 def occurrence_block(count: int, found: dict, recent: List[str], extra: Optional[List[str]] = None) -> str:
@@ -405,7 +449,7 @@ def issue_body(problem: dict, found: dict, previous: Optional[int] = None) -> st
         figure = "우리 코드 컴파일 시간 +%.0f%% (+%.1f초). 현재 %.1f초, 최근 중앙값 %.1f초" % (
             problem["increase_pct"], problem["increase_s"], problem["current"], problem["median"])
     parts = ["## 종류와 수치", "- 종류: %s" % kind, "- 수치: %s" % figure,
-             "## 처음 발견한 곳", "- 위치: %s" % found["where"], "- 브랜치: %s" % found["branch"],
+             "## 처음 발견한 곳", "- 위치: %s" % found["where"], "- 브랜치: %s" % code_span(found["branch"]),
              "- 커밋: %s" % found["commit"]]
     if found.get("run_url"):
         parts.append("- 실행: %s" % found["run_url"])
@@ -475,11 +519,16 @@ def build_regression(current: dict, baseline: List[dict], ratio: float = 0.30,
 
 
 class GitHub:
-    def __init__(self, run=subprocess.run):
+    def __init__(self, run=subprocess.run, repo_root: str = REPO_ROOT):
         self.run = run
+        self.repo_root = repo_root
 
     def gh(self, *args: str) -> str:
-        result = self.run(["gh"] + list(args), capture_output=True, text=True)
+        try:  # 네트워크가 멈춰도 hook 예산(600초)을 다 쓰지 않는다
+            result = self.run(["gh"] + list(args), capture_output=True, text=True, timeout=GH_TIMEOUT,
+                              cwd=self.repo_root)
+        except subprocess.TimeoutExpired:
+            raise GitHubError("gh %s 시간 초과 (%d초)" % (args[0], GH_TIMEOUT))
         if result.returncode != 0:
             raise GitHubError("gh %s 실패 (exit %s): %s" % (args[0], result.returncode, (result.stderr or "").strip()))
         return result.stdout
@@ -492,7 +541,7 @@ class GitHub:
 
     def issues(self) -> List[dict]:
         return json.loads(self.gh("issue", "list", "--label", "perf-auto", "--state", "all", "--limit", "200",
-                                  "--json", "number,state,title,body"))
+                                  "--json", "number,state,stateReason,title,body"))
 
     def create_issue(self, title: str, body: str, labels: List[str]) -> str:
         args = ["issue", "create", "--title", title, "--body", body]
@@ -525,8 +574,11 @@ def merge_duplicates(problems: List[dict]) -> List[dict]:
             continue
         kept = merged[sig]
         kept["files"] += [f for f in p.get("files", []) if f not in kept["files"]]
+        stale = kept.get("stale_binary") or p.get("stale_binary")
         if p["kind"] == "hang" and p["duration_ms"] > kept["duration_ms"]:
-            merged[sig] = dict(p, files=kept["files"])
+            merged[sig] = kept = dict(p, files=kept["files"])
+        if stale:  # 하나라도 기호화를 믿을 수 없으면 합친 문제도 그렇다
+            kept["stale_binary"] = True
     return list(merged.values())
 
 
@@ -567,10 +619,14 @@ def report(data: dict, where: str, changed: Optional[Set[str]], github, pr: Opti
         print("경고: 변경 파일을 알 수 없어 모든 문제를 이번 변경으로 봅니다")
     changes, existing = [], []
     for p in problems:
-        if where == "main":
+        if p.get("stale_binary"):
+            changes.append(p)  # 문제 뒤에 바이너리가 바뀌어 기호화를 믿을 수 없다. main에서도 이슈로 올리지 않는다
+        elif where == "main":
             existing.append(p)
         elif p["kind"] == "build-time":
             (changes if where == "pr" else existing).append(p)
+        elif p["kind"] == "crash" and not p.get("files"):
+            changes.append(p)  # 앱 프레임 없는 크래시: 파일로 판정할 수 없어 컴파일 시간처럼 다룬다(main만 기존)
         else:
             (changes if unknown or classify(p, changed) == "change" else existing).append(p)
     if where == "local":
@@ -632,6 +688,8 @@ def handle_existing(existing: List[dict], where: str, found: dict, github, dry_r
                     pending.append({"number": opened["number"], "title": title, "body": body, "labels": labels})
                     raise
                 print("[기존 → 이슈 #%d] %s" % (opened["number"], title))
+            elif closed and (closed.get("stateReason") or "").upper() == "NOT_PLANNED":
+                print("[기존 → 닫힌 이슈 #%d (계획 없음), 기록만] %s" % (closed["number"], title))  # 사람이 끈 문제
             elif closed and where == "local":
                 print("[기존 → 이슈 #%d 닫힘, 새로 만들지 않음] %s" % (closed["number"], title))
             else:
@@ -675,7 +733,10 @@ def parse_iso(text: str) -> Optional[datetime.datetime]:
 
 
 def gh_text(run, *args: str) -> str:
-    result = run(["gh", "api"] + list(args), capture_output=True, text=True)
+    try:
+        result = run(["gh", "api"] + list(args), capture_output=True, text=True, timeout=GH_TIMEOUT, cwd=REPO_ROOT)
+    except subprocess.TimeoutExpired:
+        raise GitHubError("gh api 시간 초과")
     if result.returncode != 0:
         raise GitHubError("gh api 실패")
     return result.stdout

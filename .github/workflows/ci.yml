@@ -126,17 +126,27 @@ jobs:
             fi
             echo "| 이름 | 값 |"
             echo "|---|---|"
-            jq -r '"| 우리 코드 컴파일(초) | \(.swift_compile_s // "없음") |",
-                   "| 시스템 모듈 준비(초) | \(.system_modules_s // "없음") |",
-                   "| 정규화 값 | \(.ratio // "없음") |",
-                   "| xcodebuild 첫 출력까지(초) | \(.xcodebuild_start_s // "없음") |",
-                   "| 전체 빌드 단계(초) | \(.build_step_s // "없음") |"' .build/perf/build-metrics.json
+            if [ -f .build/perf/report.json ]; then
+              jq -r '"| 성능 문제 | \(.problems | length) |",
+                     "| 무시한 hang (우리 코드 없음) | \(.ignored_hangs) |"' .build/perf/report.json \
+                || echo "| 성능 보고서 | 읽기 실패 |"
+            fi
+            if [ -f .build/perf/build-metrics.json ]; then  # 측정 단계가 실패하면 파일이 없다
+              jq -r '"| 우리 코드 컴파일(초) | \(.swift_compile_s // "없음") |",
+                     "| 시스템 모듈 준비(초) | \(.system_modules_s // "없음") |",
+                     "| 정규화 값 | \(.ratio // "없음") |",
+                     "| xcodebuild 첫 출력까지(초) | \(.xcodebuild_start_s // "없음") |",
+                     "| 전체 빌드 단계(초) | \(.build_step_s // "없음") |"' .build/perf/build-metrics.json \
+                || echo "| 빌드 측정값 | 읽기 실패 |"
+            else
+              echo "| 빌드 측정값 | 없음 |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 측정값 유효 확인
         id: valid
         if: github.event_name == 'push'
-        run: echo "ok=$(jq -r '.swift_compile_s != null' .build/perf/build-metrics.json)" >> "$GITHUB_OUTPUT"  # 실패한 빌드는 기준이 되지 않는다
+        run: echo "ok=$(jq -r '.swift_compile_s != null' .build/perf/build-metrics.json 2> /dev/null || echo false)" >> "$GITHUB_OUTPUT"  # 실패한 빌드·파일 없음은 기준이 되지 않는다
 
       - name: 측정값 올리기 (main)
         if: github.event_name == 'push' && steps.valid.outputs.ok == 'true'

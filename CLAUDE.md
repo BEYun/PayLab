@@ -223,7 +223,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 - 위 "현재 6개"는 기반 단계 기준이다.
 
 ### 테스트 개수 (2026-11-12)
-- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 68개(`scripts/test_perf_report.py`, `unittest`).
+- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 84개(`scripts/test_perf_report.py`, `unittest`, 2026-11-12 최종 리뷰 반영 후 실행 결과 `Ran 84 tests`).
 
 ## 트랜잭션 (송금 정합성)
 
@@ -285,12 +285,16 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 | `slow-build` 컴파일 시간 | CI `-showBuildTimingSummary` | 우리 코드 컴파일이 main 최근 5회 중앙값보다 **30% 이상, 10초 이상** 늘어남. 기준 5회 미만이면 판정 안 함 | CI만 |
 
 - hang `duration`은 하한이다. 실제보다 최대 약 50ms 짧게 찍힌다.
-- UI 테스트는 앱을 띄울 때마다 약 1.3초 시스템 hang(UIKit 접근성 초기화)을 만든다. 스택에 우리 코드가 진입점뿐인 hang은 무시하고 `report.json`의 `ignored_hangs`에만 센다(`test-all.sh` 한 번에 보통 4).
+- UI 테스트는 앱을 띄울 때마다 약 1.3초 시스템 hang을 만든다. 원인은 UIKit 접근성 초기화로 **추정**한다(잡힌 우리 코드 프레임은 진입점뿐이라 확인하지 못함). 스택에 우리 코드가 진입점뿐인 hang은 무시하고 `report.json`의 `ignored_hangs`에만 센다(`test-all.sh` 한 번에 보통 4).
+- 디버거로 멈춘 시간(중단점)도 감시자에게는 hang으로 보인다. 디버깅한 시간대에는 `collect`를 돌리지 않는다.
 - "우리 코드" = 기호화한 파일이 저장소 안인 프레임. 컴파일러가 만든 진입점(`main`, `PayLabApp.$main()`)은 뺀다.
 
 ### 판정: 이번 변경 vs 기존
 - 위치 파일: crash·hang은 스택의 **모든** 우리 코드 프레임 파일, 느린 함수는 경고가 가리킨 파일. 컴파일 시간은 파일 없음(PR = 이번 변경, main = 기존).
-- 위치 파일 중 하나라도 변경 파일이면 "이번 변경", 아니면 "기존". 스택에 우리 코드가 없는 크래시는 "기존".
+- 위치 파일 중 하나라도 변경 파일이면 "이번 변경", 아니면 "기존".
+- 스택에 우리 코드가 없는 크래시는 컴파일 시간처럼: 로컬·PR = "이번 변경"(이슈 없음), main = "기존". 서명은 가장 안쪽의 기호화된 프레임 함수(없으면 기호)라 시스템 코드만 있는 크래시끼리 섞이지 않는다.
+- 기호화에 쓴 바이너리가 문제보다 나중에 바뀌었으면(수정 시각 기준) 그 문제에 `"stale_binary": true` + `warnings`가 붙는다. 함수·파일이 틀릴 수 있어 main에서도 "이번 변경"으로 보고 이슈로 올리지 않는다.
+  - `test-all.sh`는 UI 단계 빌드가 `PayLab.debug.dylib`을 다시 서명해(코드는 같고 수정 시각만 바뀜) 단위·통합 단계에서 난 hang·크래시가 여기에 걸린다. 그래서 로컬에서는 그 단계의 기존 문제도 커밋을 막는다. CI는 한 번만 빌드해 해당 없음.
 - 변경 파일: 로컬 = `origin/main` merge-base 이후 커밋 + 스테이징 + 미스테이징 + 새 파일(`git fetch` 안 함). PR = `--changed-from HEAD^1`. main push = 판정 없음(모두 기존).
 - 변경 파일을 알 수 없으면 전부 "이번 변경"으로 본다.
 - 로컬은 변경된 Swift 파일의 느린 함수만 본다. `test-all.sh`가 빌드 전에 그 파일을 `touch`해 다시 컴파일시킨다. 기존 느린 함수는 CI가 잡는다.
@@ -299,16 +303,18 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 ### 이슈 (공개)
 - 라벨: `perf-auto` + `crash`/`hang`/`slow-build` 중 하나. 없으면 만든다.
 - 제목: `[hang] HistoryModel.makeSections(_:) 714ms`. 본문: 수치, 처음 발견한 곳(로컬/CI, 브랜치, 커밋, CI 실행), 재현 단서(직전 앱 로그), 우리 코드 스택(파일:줄), 숨은 서명, 발생 기록.
-- 서명 `<!-- perf-signature: … -->`: crash = 예외 종류 + 가장 안쪽 우리 함수, hang = 가장 안쪽 우리 함수, 느린 함수 = 파일 + 함수(줄 번호 없음), 컴파일 시간 = 고정 하나.
+- 서명 `<!-- perf-signature: … -->`: crash = 예외 종류 + 가장 안쪽 우리 함수(없으면 가장 안쪽 기호화된 프레임의 함수·기호), hang = 가장 안쪽 우리 함수, 느린 함수 = 파일 + 함수(줄 번호 없음), 컴파일 시간 = 고정 하나.
 - 같은 서명의 **열린** 이슈가 있으면 새로 만들지 않고 본문의 발생 기록(`<!-- perf-occurrences:start/end -->`: 횟수, 마지막 발견, 최근 발견한 곳)만 고친다. 코멘트는 달지 않는다.
 - 같은 서명의 **닫힌** 이슈만 있으면: CI는 이전 이슈를 링크한 새 이슈를 만들고, 로컬은 출력만 한다(오래된 브랜치가 이미 고친 문제로 가짜 재발 이슈를 만들지 않게).
+  - 예외: 가장 최근 닫힌 이슈가 "계획 없음"(`stateReason` `NOT_PLANNED`)이면 로컬·PR·main 모두 출력만 한다(`[기존 → 닫힌 이슈 #n (계획 없음), 기록만]`). 거짓 양성을 끄는 방법이다.
 - 올리기 전 홈 경로(`~`), UDID, 컴퓨터 이름, 메일, 토큰 모양 문자열을 지운다. 이슈를 만든 뒤 `gh issue view <번호> --json body`로 본문을 읽어 확인한다.
-- `gh` 실패 시 로컬은 경고만 하고 넘어간다.
+- 브랜치 이름은 본문·발생 기록에서 코드(`` ` ``)로 감싼다(`@` 멘션 방지).
+- `gh` 호출 한 번은 60초 제한이다. 실패·시간 초과 시 경고만 하고 넘어가며, 올리지 못한 이슈는 `.build/perf/pending-issues.json`에 남는다.
 
 ### 로컬
 `scripts/test-all.sh`는 끝에서(테스트 성공·실패 무관) `collect` → `report --where local`을 돈다. 이번 변경의 hang·느린 함수가 있으면 `실패: 이번 변경의 성능 문제`로 끝나 커밋이 막힌다.
 - 읽는 곳: 출력의 `[이번 변경] [hang] <함수> <ms> <파일:줄>` 줄, `.build/perf/report.json`(`problems`, `ignored_hangs`, `warnings`).
-- `report` 종료 코드: 0 정상(기존 문제만 있거나 없음), 1 이번 변경 있음, 2 사용 오류. `collect`는 시뮬레이터 로그·products 디렉터리를 못 읽으면 2.
+- `report` 종료 코드: 0 정상(기존 문제만 있거나 없음), 1 이번 변경 있음, 2 사용 오류. `collect`는 시뮬레이터 로그·products 디렉터리를 못 읽거나, hang·크래시 프레임의 이미지 기호화(`dsymutil`·`atos`)가 실패·시간 초과(120초)하면 2. 기호화 실패를 경고로 넘기면 우리 코드 hang이 "무시"로 보이기 때문이다.
 - 기존 문제는 자동으로 이슈가 된다(`gh` 필요). 차단하지 않는다.
 - 막히면 그 문제를 고친다. 이슈로 돌리려고 우회하지 않는다.
 
@@ -320,7 +326,7 @@ START=$(date '+%Y-%m-%d %H:%M:%S')   # 확인을 시작할 때 기록
 python3 -I scripts/perf-report.py collect --since "$START" --device "$UDID" --products .build/DerivedData/Build/Products/Debug-iphonesimulator --out .build/perf/report.json
 python3 -I scripts/perf-report.py report --input .build/perf/report.json --where local   # 이번 변경이면 [이번 변경] 줄 + 종료 1
 ```
-- 기호화는 `.build/DerivedData`의 마지막 빌드 바이너리로 한다. 확인한 앱과 같은 빌드여야 한다. `--build-log`를 빼면 느린 함수 경고는 수집하지 않는다.
+- 기호화는 `.build/DerivedData`의 마지막 빌드 바이너리로 한다. 확인한 앱과 같은 빌드여야 한다. 확인 뒤 다시 빌드했으면 `stale_binary`로 "이번 변경"이 된다. `--build-log`를 빼면 느린 함수 경고는 수집하지 않는다.
 - `report`에 `--dry-run`을 붙이면 `gh`를 부르지 않고 할 일만 출력한다. `--no-changes`는 변경 파일 없음으로 본다(시연·테스트용).
 
 ### CI

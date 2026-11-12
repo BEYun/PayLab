@@ -5,7 +5,9 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import time
 import types
@@ -146,6 +148,18 @@ class SymbolizeTests(unittest.TestCase):
         atos = [c for c in calls if "atos" in c][0]
         self.assertEqual(atos[-2:], [hex(0x1000), hex(0x2000 - 1)])  # #0은 pc, #1부터 복귀 주소
 
+    def test_symbolize_records_failure_and_passes_timeout(self):
+        seen, failures = [], []
+
+        def run(cmd, **kw):
+            seen.append(kw.get("timeout"))
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom") if "atos" in cmd else ok()
+        out = pr.symbolize([frame(image="HomeFeature", address=0x1000, base=0x800)], self.products, REPO,
+                           run=run, failures=failures)
+        self.assertIsNone(out[0]["function"])  # 기호화 못 한 프레임은 그대로
+        self.assertEqual(failures, ["atos HomeFeature 실패 (exit 1)"])
+        self.assertEqual(seen, [pr.TOOL_TIMEOUT, pr.TOOL_TIMEOUT])  # dsymutil, atos
+
     def test_find_binary_prefers_non_test_bundle_then_shallow_then_sorted(self):
         for rel in ["HomeFeatureTests.xctest/Frameworks/HomeFeature.framework/HomeFeature",
                     "PayLab.app/Frameworks/HomeFeature.framework/HomeFeature"]:
@@ -190,15 +204,16 @@ class CollectTests(unittest.TestCase):
             os.environ["TZ"] = old
         time.tzset()
 
-    def collect(self, hang_lines="", since="2026-11-12 10:00:00", build_logs=(), tool=None):
+    def collect(self, hang_lines="", since="2026-11-12 10:00:00", build_logs=(), tool=None, branch="abc123\n", env=None):
         def run(cmd, **kw):
             if "log" in cmd and "show" in cmd:
                 self.log_cmd = cmd
                 return ok(hang_lines)
             if cmd[:1] == ["git"]:
-                return ok("abc123\n")
+                return ok(branch if "branch" in cmd else "abc123\n")
             return tool(cmd) if tool else ok()
-        return pr.collect(since, DEVICE, self.products, list(build_logs), REPO, run=run, crash_dir=self.crash_dir)
+        return pr.collect(since, DEVICE, self.products, list(build_logs), REPO, run=run, crash_dir=self.crash_dir,
+                          env={} if env is None else env)
 
     def test_collect_ignores_other_device_crash(self):
         report = self.collect()
@@ -231,10 +246,13 @@ class CollectTests(unittest.TestCase):
             "files": ["Modules/HomeFeature/Sources/HistoryModel.swift"]}])
         self.assertEqual(report["timing"], {"SwiftCompile": 2.5})
 
-    def add_binary(self, rel):
+    BUILT = pr.parse_time("2026-11-12 09:00:00 +0900").timestamp()  # 고정 문제 시각(10시대)보다 이른 빌드
+
+    def add_binary(self, rel, built=None):
         path = os.path.join(self.products, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, "w").close()
+        os.utime(path, (built or self.BUILT,) * 2)
 
     def rewrite_crash(self, name, captured, header):
         path = os.path.join(self.crash_dir, name)
@@ -272,6 +290,37 @@ class CollectTests(unittest.TestCase):
         self.assertEqual((problem["kind"], problem["duration_ms"]), ("hang", 412))
         self.assertEqual(problem["files"], ["Modules/HomeFeature/Sources/HistoryModel.swift"])
         self.assertEqual(problem["context"], ["load start"])
+        self.assertNotIn("stale_binary", problem)  # 바이너리(09시)가 hang(10시)보다 먼저
+
+    def test_binary_rebuilt_after_problem_marks_stale(self):
+        self.add_binary("HomeFeature.framework/HomeFeature", built=pr.parse_time("2026-11-12 10:30:00 +0900").timestamp())
+
+        def tool(cmd):
+            return ok("f() (in HomeFeature) (%s/Modules/HomeFeature/Sources/HistoryModel.swift:42)\n" % REPO) \
+                if "atos" in cmd else ok()
+        report = self.collect(hang_lines=self.HANG_IN_HOMEFEATURE, since="2026-11-12 11:00:00", tool=tool)
+        self.assertTrue(report["problems"][0]["stale_binary"])
+        self.assertEqual(len(report["warnings"]), 1)
+        self.assertIn("HomeFeature 바이너리가 hang(2026-11-12 10:00:00.000000+0900) 뒤에 바뀜", report["warnings"][0])
+
+    def test_crash_with_rebuilt_binary_is_stale(self):
+        self.add_binary("PayLab.app/PayLab.debug.dylib", built=pr.parse_time("2026-11-12 10:05:01 +0900").timestamp())
+
+        def tool(cmd):
+            return ok("PayLabModel.load() (in PayLab.debug.dylib) (%s/Modules/App/Sources/Model.swift:9)\n" % REPO) \
+                if "atos" in cmd else ok()
+        crash = self.collect(tool=tool)["problems"][0]
+        self.assertEqual(crash["kind"], "crash")
+        self.assertTrue(crash["stale_binary"])
+
+    def test_branch_falls_back_to_ci_env(self):
+        def branch(env):
+            return self.collect(since="2026-11-12 11:00:00", branch="", env=env)["branch"]
+        self.assertEqual(branch({"GITHUB_HEAD_REF": "fix/@bob", "GITHUB_REF_NAME": "12/merge"}), "fix/@bob")
+        self.assertEqual(branch({"GITHUB_HEAD_REF": "", "GITHUB_REF_NAME": "main"}), "main")  # push에서 HEAD_REF는 빈 값
+        self.assertEqual(branch({}), "unknown")
+        self.assertEqual(self.collect(since="2026-11-12 11:00:00", branch="feature/x\n",
+                                      env={"GITHUB_HEAD_REF": "other"})["branch"], "feature/x")
 
     def test_crash_goes_through_symbolize(self):
         self.add_binary("PayLab.app/PayLab.debug.dylib")
@@ -287,26 +336,51 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(crash["frames"][1]["function"], "PayLabModel.load()")
         self.assertEqual(atos_cmds[0][-1], hex(4347117568 + 18904 - 1))  # 크래시 프레임 #1은 복귀 주소
 
-    def test_atos_failure_becomes_warning_not_ignored_hang_silence(self):
+    HANG_IN_HOMEFEATURE = "\n".join([hang_event("hang id=1 duration=412ms frames=1"),
+                                     hang_event("hang frame id=1 #0 HomeFeature 0x1000 base=0x800 f")])
+
+    def assert_collect_fails(self, tool, expected, **kw):
+        with self.assertRaises(pr.CollectError) as cm:
+            self.collect(tool=tool, **kw)
+        self.assertIn(expected, str(cm.exception))
+
+    def test_atos_failure_fails_collect_instead_of_ignored_hang(self):
         self.add_binary("HomeFeature.framework/HomeFeature")
-        lines = "\n".join([hang_event("hang id=1 duration=412ms frames=1"),
-                           hang_event("hang frame id=1 #0 HomeFeature 0x1000 base=0x800 f")])
 
         def tool(cmd):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="boom") if "atos" in cmd else ok()
-        report = self.collect(hang_lines=lines, since="2026-11-12 11:00:00", tool=tool)
-        self.assertEqual(report["problems"], [])
-        self.assertTrue(any("atos HomeFeature" in w for w in report["warnings"]), report["warnings"])
+        self.assert_collect_fails(tool, "atos HomeFeature 실패 (exit 1)", hang_lines=self.HANG_IN_HOMEFEATURE,
+                                  since="2026-11-12 11:00:00")
 
-    def test_dsymutil_missing_becomes_warning(self):
+    def test_dsymutil_missing_fails_collect(self):
         self.add_binary("HomeFeature.framework/HomeFeature")
-        lines = "\n".join([hang_event("hang id=1 duration=412ms frames=1"),
-                           hang_event("hang frame id=1 #0 HomeFeature 0x1000 base=0x800 f")])
 
         def tool(cmd):
             raise FileNotFoundError("xcrun")
-        report = self.collect(hang_lines=lines, since="2026-11-12 11:00:00", tool=tool)
-        self.assertTrue(any("dsymutil HomeFeature" in w for w in report["warnings"]), report["warnings"])
+        self.assert_collect_fails(tool, "dsymutil HomeFeature 실패", hang_lines=self.HANG_IN_HOMEFEATURE,
+                                  since="2026-11-12 11:00:00")
+
+    def test_symbolize_timeout_fails_collect(self):
+        self.add_binary("HomeFeature.framework/HomeFeature")
+
+        def tool(cmd):
+            raise subprocess.TimeoutExpired(cmd, pr.TOOL_TIMEOUT)
+        self.assert_collect_fails(tool, "dsymutil HomeFeature 실패 (120초 초과)", hang_lines=self.HANG_IN_HOMEFEATURE,
+                                  since="2026-11-12 11:00:00")
+
+    def test_crash_atos_failure_fails_collect(self):
+        self.add_binary("PayLab.app/PayLab.debug.dylib")
+
+        def tool(cmd):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom") if "atos" in cmd else ok()
+        self.assert_collect_fails(tool, "atos PayLab.debug.dylib")
+
+    def test_symbolize_failure_outside_problem_frames_does_not_fail(self):
+        self.add_binary("PayLab.app/PayLab.debug.dylib")  # since 전 크래시(10:05)·다른 기기 크래시(10:06)에만 있는 이미지
+
+        def tool(cmd):
+            raise AssertionError("기호화하면 안 됨: %s" % cmd)
+        self.assertEqual(self.collect(since="2026-11-12 10:05:01", tool=tool)["problems"], [])
 
     def test_log_show_failure_raises(self):
         def run(cmd, **kw):
@@ -363,6 +437,14 @@ def crash_problem(files=(SRC,)):
             "frames": [frame(function="HistoryModel.load()", file=SRC, line=3)]}
 
 
+def system_crash(symbol="__pthread_kill", exception="EXC_CRASH"):
+    """앱 프레임이 없는 크래시. 우리 바이너리 프레임은 진입점뿐이다."""
+    return {"kind": "crash", "exception": exception, "message": "", "time": "t", "files": [], "context": [],
+            "frames": [frame(image="libsystem_kernel.dylib", symbol=symbol),
+                       frame(image="PayLab.debug.dylib", function="static PayLabApp.$main()",
+                             file="Modules/App/Sources/PayLabApp.swift")]}
+
+
 def report_data(*problems, warnings=()):
     return {"version": 1, "commit": "abc1234", "branch": "feature/x", "problems": list(problems),
             "timing": {}, "ignored_hangs": 0, "warnings": list(warnings)}
@@ -410,8 +492,8 @@ class ReportTests(unittest.TestCase):
             code = pr.report(data, where, None if changed is None else set(changed), gh, out_dir=self.out, env={}, **kw)
         return code, buf.getvalue(), gh
 
-    def open_issue(self, problem, number=7, state="OPEN"):
-        return {"number": number, "state": state, "title": pr.issue_title(problem),
+    def open_issue(self, problem, number=7, state="OPEN", reason=""):
+        return {"number": number, "state": state, "stateReason": reason, "title": pr.issue_title(problem),
                 "body": pr.issue_body(problem, FOUND)}
 
     def test_classify_change_when_any_frame_file_changed(self):
@@ -440,10 +522,10 @@ class ReportTests(unittest.TestCase):
     def test_sanitize_removes_machine_info(self):
         udid = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
         text = ("/Users/tester/PayLab/Modules/X.swift /Users/tester/Library/Logs /Users/other/secret.txt "
-                "/Users/runner/work/PayLab/PayLab/Modules/Y.swift %s me@example.com ghp_%s sk-%s Yuns-Mac" %
+                "/Users/runner/work/PayLab/PayLab/Modules/Y.swift %s me@example.com ghp_%s sk-%s test-host" %
                 (udid, "a" * 36, "b" * 30))
         with mock.patch.dict(os.environ, {"HOME": "/Users/tester"}), \
-                mock.patch.object(pr.socket, "gethostname", lambda: "Yuns-Mac"):
+                mock.patch.object(pr.socket, "gethostname", lambda: "test-host"):
             out = pr.sanitize(text, "/Users/tester/PayLab")
         self.assertEqual(out, "Modules/X.swift ~/Library/Logs ~/secret.txt Modules/Y.swift <UDID> <email> "
                               "<token> <token> <host>")
@@ -672,18 +754,18 @@ class ReportTests(unittest.TestCase):
 
     def test_report_text_never_contains_machine_info(self):
         udid = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
-        secret = ["/Users/bob/Secret", udid, "me@example.com", "Yuns-Mac"]
-        p = hang_problem(fn="load(/Users/bob/Secret %s me@example.com Yuns-Mac)" % udid)
-        p["context"] = ["log /Users/bob/Secret %s me@example.com Yuns-Mac" % udid]
+        secret = ["/Users/bob/Secret", udid, "me@example.com", "test-host"]
+        p = hang_problem(fn="load(/Users/bob/Secret %s me@example.com test-host)" % udid)
+        p["context"] = ["log /Users/bob/Secret %s me@example.com test-host" % udid]
         p["message"] = "x"
         data = dict(report_data(p, crash_problem()), branch="fix/me@example.com")
-        data["problems"][1]["message"] = "Yuns-Mac /Users/bob/Secret"
+        data["problems"][1]["message"] = "test-host /Users/bob/Secret"
 
         def check(text):
             for item in secret:
                 self.assertNotIn(item, text)
         with mock.patch.dict(os.environ, {"HOME": "/Users/bob"}), \
-                mock.patch.object(pr.socket, "gethostname", lambda: "Yuns-Mac"):
+                mock.patch.object(pr.socket, "gethostname", lambda: "test-host"):
             sig = pr.sanitize(pr.signature(p), REPO)
             clean_issue = {"number": 3, "state": "OPEN", "title": "t",
                            "body": pr.sanitize(pr.issue_body(p, FOUND), REPO)}
@@ -716,6 +798,88 @@ class ReportTests(unittest.TestCase):
     def test_created_issue_line_has_number(self):
         code, out, gh = self.run_report(report_data(hang_problem()), "main")
         self.assertIn("[기존 → 이슈 #1] [hang] HistoryModel.load() 412ms", out)
+
+    def test_crash_without_app_frame_is_change_except_main(self):
+        code, out, gh = self.run_report(report_data(system_crash()), "local", changed={"other.swift"})
+        self.assertEqual((code, gh.created), (1, []))
+        self.assertIn("[이번 변경] [crash] EXC_CRASH", out)
+        code, out, gh = self.run_report(report_data(system_crash()), "pr", changed={"other.swift"}, pr=4)
+        self.assertEqual((code, gh.created), (0, []))
+        self.assertFalse(gh.comments[0][2])  # 이번 변경 목록으로 코멘트
+        self.assertIn("[crash] EXC_CRASH", gh.comments[0][1])
+        code, out, gh = self.run_report(report_data(system_crash()), "main")
+        self.assertEqual(len(gh.created), 1)
+        self.assertIn("<!-- perf-signature: crash|EXC_CRASH|__pthread_kill -->", gh.created[0][1])
+
+    def test_system_only_crashes_keep_separate_signatures(self):
+        a, b = system_crash("__pthread_kill"), system_crash("_dispatch_assert_queue_fail")
+        self.assertEqual(pr.signature(a), "crash|EXC_CRASH|__pthread_kill")
+        self.assertNotEqual(pr.signature(a), pr.signature(b))
+        self.assertEqual(len(pr.merge_duplicates([a, b])), 2)
+        atos_named = dict(a, frames=[frame(image="X", function="X.f()", symbol="$sX")] + a["frames"])
+        self.assertEqual(pr.signature(atos_named), "crash|EXC_CRASH|X.f()")  # 함수 이름이 기호보다 먼저
+        self.assertEqual(pr.signature(crash_problem()), "crash|EXC_BREAKPOINT|HistoryModel.load()")  # 앱 프레임 우선
+
+    def test_stale_binary_is_change_even_on_main(self):
+        stale = dict(hang_problem(), stale_binary=True)
+        code, out, gh = self.run_report(report_data(stale), "main")
+        self.assertEqual((code, gh.created, gh.edited), (0, [], []))
+        self.assertIn("[이번 변경] [hang] HistoryModel.load() 412ms", out)
+        code, out, gh = self.run_report(report_data(stale), "local", changed={"other.swift"})
+        self.assertEqual((code, gh.created), (1, []))
+        code, out, gh = self.run_report(report_data(stale), "pr", changed={"other.swift"}, pr=2)
+        self.assertEqual(gh.created, [])
+        self.assertFalse(gh.comments[0][2])
+        for pair in ([hang_problem(ms=900), stale], [stale, hang_problem(ms=900)]):  # 합쳐도 오래된 표시는 남는다
+            code, out, gh = self.run_report(report_data(*pair), "main")
+            self.assertEqual(gh.created, [])
+            self.assertIn("900ms", out)
+
+    def test_closed_not_planned_only_prints_in_all_modes(self):
+        closed = self.open_issue(hang_problem(), number=5, state="CLOSED", reason="NOT_PLANNED")
+        for where in ("local", "pr", "main"):
+            code, out, gh = self.run_report(report_data(hang_problem()), where, changed={"other.swift"},
+                                            gh=FakeGitHub([closed]), pr=1)
+            self.assertEqual((code, gh.created, gh.edited), (0, [], []), where)
+            self.assertIn("[기존 → 닫힌 이슈 #5 (계획 없음), 기록만] [hang] HistoryModel.load() 412ms", out)
+            self.assertNotIn("[기존 → 이슈", out)
+
+    def test_latest_closed_issue_decides_not_planned(self):
+        done = self.open_issue(hang_problem(), number=5, state="CLOSED", reason="COMPLETED")
+        old_not_planned = self.open_issue(hang_problem(), number=3, state="CLOSED", reason="NOT_PLANNED")
+        code, out, gh = self.run_report(report_data(hang_problem()), "main", gh=FakeGitHub([old_not_planned, done]))
+        self.assertEqual(len(gh.created), 1)  # 완료로 닫힘 -> CI는 이전 이슈를 링크해 새로 만든다
+        self.assertIn("- 이전 이슈: #5", gh.created[0][1])
+        code, out, gh = self.run_report(report_data(hang_problem()), "local", gh=FakeGitHub([old_not_planned, done]))
+        self.assertEqual(gh.created, [])
+        self.assertIn("[기존 → 이슈 #5 닫힘, 새로 만들지 않음]", out)
+        newest_not_planned = dict(done, number=9, stateReason="NOT_PLANNED")
+        code, out, gh = self.run_report(report_data(hang_problem()), "main", gh=FakeGitHub([done, newest_not_planned]))
+        self.assertEqual(gh.created, [])
+        self.assertIn("#9 (계획 없음)", out)
+
+    def test_branch_is_code_span_in_issue_body_and_occurrences(self):
+        found = dict(FOUND, branch="fix/@bob")
+        body = pr.issue_body(hang_problem(), found)
+        self.assertIn("- 브랜치: `fix/@bob`", body)
+        self.assertIn("  - 로컬 · `fix/@bob` · abc1234", body)
+        body = pr.record_occurrence(body, dict(found, branch="a`b@c"))  # 이름 안의 백틱은 지운다
+        self.assertIn("  - 로컬 · `ab@c` · abc1234", body)
+        self.assertIn("  - 로컬 · `fix/@bob` · abc1234", body)
+        code, out, gh = self.run_report(dict(report_data(hang_problem()), branch="fix/@bob"), "main")
+        self.assertNotIn("@", re.sub(r"`[^`]*`", "", gh.created[0][1]))  # 코드 밖에는 @가 없다
+
+    def test_gh_timeout_is_a_gh_failure(self):
+        def slow(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        code, out, _ = self.run_report(report_data(hang_problem()), "local", gh=pr.GitHub(run=slow))
+        self.assertEqual(code, 0)
+        self.assertIn("시간 초과 (60초)", out)
+        with open(os.path.join(self.out, "pending-issues.json")) as f:
+            self.assertEqual(len(json.load(f)), 1)
+        code, out, _ = self.run_report(report_data(hang_problem()), "pr", changed={SRC}, pr=3, gh=pr.GitHub(run=slow))
+        self.assertEqual(code, 0)
+        self.assertIn("경고: PR 코멘트 실패", out)
 
 
 class CiMetricsTests(unittest.TestCase):
@@ -766,14 +930,29 @@ class CiMetricsTests(unittest.TestCase):
     def test_ci_metrics_cli_writes_file(self):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "m", "build-metrics.json")
+            stdout = io.StringIO()
             with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "o/r"}), \
-                    mock.patch.object(pr.subprocess, "run", self.fake_run()):
+                    mock.patch.object(pr.subprocess, "run", self.fake_run()), contextlib.redirect_stdout(stdout):
                 code = pr.main(["ci-metrics", "--report", os.path.join(d, "none.json"), "--run-id", "5", "--out", out])
             self.assertEqual(code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["build_step_s"], 376)  # 한 줄 요약도 낸다
             with open(out) as f:
                 data = json.load(f)
             self.assertIsNone(data["swift_compile_s"])
             self.assertEqual(data["build_step_s"], 376)
+
+    def test_ci_metrics_gh_timeout_leaves_steps_empty(self):
+        seen = []
+
+        def slow(cmd, **kw):
+            seen.append((kw.get("timeout"), kw.get("cwd")))
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            m = pr.ci_metrics(self.REPORT, "5", "o/r", run=slow)
+        self.assertIsNone(m["build_step_s"])
+        self.assertEqual(m["swift_compile_s"], 23.0)
+        self.assertEqual(seen, [(60, pr.REPO_ROOT)])
+        self.assertIn("GitHubError", err.getvalue())
 
     def test_build_regression_ignores_null_compile_time(self):
         base = [metric(100.0)] * 5
@@ -805,6 +984,17 @@ class GitHubTests(unittest.TestCase):
             return ok("[]")
         self.assertFalse(pr.GitHub(run=fake).upsert_pr_comment(3, "x", only_if_exists=True))
         self.assertEqual(len(calls), 1)
+
+    def test_gh_has_timeout_repo_cwd_and_state_reason(self):
+        seen = []
+
+        def fake(cmd, **kw):
+            seen.append((cmd, kw))
+            return ok("[]")
+        pr.GitHub(run=fake).issues()
+        cmd, kw = seen[0]
+        self.assertEqual((kw["timeout"], kw["cwd"]), (60, pr.REPO_ROOT))
+        self.assertIn("stateReason", cmd[cmd.index("--json") + 1].split(","))
 
     def test_nonzero_exit_raises(self):
         def fake(cmd, **kw):

@@ -15,19 +15,19 @@ private final class Reports: Sendable {
     var all: [HangReport] { reports.withLock { $0 } }
 }
 
-// 테스트 호스트(PayLab 앱)에서도 앱 전역 감시자(250ms)가 돈다. 그 hang 로그를 남기지 않도록 메인을 막는 시간은 250ms 미만이다.
+// 테스트 호스트(PayLab 앱)에서도 앱 전역 감시자(250ms)가 돈다. 그 hang 로그를 남기지 않도록 메인을 막는 시간은 250ms보다 넉넉히 짧다(최대 100ms).
 @MainActor @Suite(.serialized)
 struct HangMonitorTests {
     @Test func reportsBlockedMainThread() async throws {
         let reports = Reports()
-        let monitor = HangMonitor(threshold: .milliseconds(50), onHang: { reports.append($0) })
+        let monitor = HangMonitor(threshold: .milliseconds(30), onHang: { reports.append($0) })
         monitor.start()
         defer { monitor.stop() }
-        blockMainThread(milliseconds: 150)
+        blockMainThread(milliseconds: 100)
         let deadline = ContinuousClock.now + .seconds(2)
         while reports.all.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
         let report = try #require(reports.all.first { $0.frames.contains { $0.symbol?.contains("blockMainThread") == true } })
-        #expect(report.durationMs >= 100)
+        #expect(report.durationMs >= 60)  // 감시 스레드가 늦게 시작해도 40ms 여유
     }
 
     @Test func ignoresShortBlocks() async throws {
