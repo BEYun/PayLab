@@ -1,0 +1,85 @@
+{"app_name": "PayLab", "timestamp": "2026-11-12 10:06:00.00 +0900", "bundleID": "com.example.paylab", "bug_type": "309", "name": "PayLab"}
+{
+  "pid": 5002,
+  "captureTime": "2026-11-12 10:06:00.1234 +0900",
+  "procName": "PayLab",
+  "procPath": "/Users/tester/Library/Developer/CoreSimulator/Devices/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/data/Containers/Bundle/Application/22222222-3333-4444-5555-666666666666/PayLab.app/PayLab",
+  "exception": {
+    "codes": "0x0000000000000001, 0x00000001e64510a4",
+    "rawCodes": [
+      1,
+      8158253220
+    ],
+    "type": "EXC_BREAKPOINT",
+    "signal": "SIGTRAP"
+  },
+  "asi": {
+    "libswiftCore.dylib": [
+      "Fatal error: Index out of range"
+    ]
+  },
+  "faultingThread": 1,
+  "usedImages": [
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4342349824,
+      "size": 16384,
+      "uuid": "1814c113-fa10-30cd-a8e3-14909e34fa19",
+      "path": "/Users/tester/Library/Developer/CoreSimulator/Devices/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/data/Containers/Bundle/Application/22222222-3333-4444-5555-666666666666/PayLab.app/PayLab",
+      "name": "PayLab"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4347117568,
+      "size": 344064,
+      "uuid": "285e30be-6e6b-3fdf-b8cc-9ecee006b577",
+      "path": "/Users/tester/Library/Developer/CoreSimulator/Devices/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/data/Containers/Bundle/Application/22222222-3333-4444-5555-666666666666/PayLab.app/PayLab.debug.dylib",
+      "name": "PayLab.debug.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 7000000000,
+      "size": 65536,
+      "uuid": "6fae6738-0877-3f55-80b9-6ae42fcb8606",
+      "path": "/usr/lib/system/libdispatch.dylib",
+      "name": "libdispatch.dylib"
+    }
+  ],
+  "threads": [
+    {
+      "id": 1000,
+      "frames": [
+        {
+          "imageOffset": 100,
+          "symbol": "mach_msg2_trap",
+          "symbolLocation": 8,
+          "imageIndex": 2
+        }
+      ]
+    },
+    {
+      "id": 1001,
+      "queue": "com.apple.root.user-initiated-qos.cooperative",
+      "triggered": true,
+      "frames": [
+        {
+          "imageOffset": 225444,
+          "symbol": "_dispatch_assert_queue_fail",
+          "symbolLocation": 104,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 18904,
+          "symbol": "$s6PayLab0A5ModelC4loadyyF",
+          "symbolLocation": 84,
+          "imageIndex": 1,
+          "sourceFile": "HistoryModel.swift",
+          "sourceLine": 42
+        }
+      ]
+    }
+  ]
+}
