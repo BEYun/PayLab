@@ -74,7 +74,9 @@ python3 -I scripts/perf-report.py changed-swift | xargs -I{} touch {}
 perf_ready=1
 
 run_tests PayLab -enableCodeCoverage YES
-run_tests PayLabUITests
+# 두 스킴이 앱을 똑같이(커버리지 켜고) 빌드해야 PayLab.debug.dylib이 다시 링크되지 않는다.
+# 다르면 hang 기호화(perf-report collect)가 마지막 바이너리로 엉뚱한 함수 이름을 만든다.
+run_tests PayLabUITests -enableCodeCoverage YES
 scripts/test-hook.sh > "$results/hook.log" 2>&1 || fail "커밋 hook 테스트" "$results/hook.log"
 echo "커밋 hook 테스트: $(grep -c '^PASS' "$results/hook.log")개 통과"
 python3 -I scripts/test_perf_report.py > "$results/perf-report.log" 2>&1 || fail "perf-report 테스트" "$results/perf-report.log"
