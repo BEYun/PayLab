@@ -5,6 +5,7 @@ import DesignSystem
 public struct HomeView: View {
     private let model: HomeModel
     private let onTransfer: (Account) -> Void
+    @State private var historyAccount: Account?
 
     public init(model: HomeModel, onTransfer: @escaping (Account) -> Void) {
         self.model = model
@@ -18,13 +19,16 @@ public struct HomeView: View {
                     ProgressView()
                 }
                 ForEach(model.accounts) { account in
-                    AccountRow(account: account, onTransfer: onTransfer)
+                    AccountRow(account: account, onOpenHistory: { historyAccount = $0 }, onTransfer: onTransfer)
                 }
             }
             .padding(PaySpacing.medium)
         }
         .background(PayColor.background)
         .navigationTitle("내 계좌")
+        .navigationDestination(item: $historyAccount) { account in
+            HistoryView(model: model.makeHistoryModel(for: account))
+        }
         .task { await model.load() }
     }
 }

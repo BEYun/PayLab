@@ -27,4 +27,9 @@ public final class HomeModel {
             log.error("load failed keep=\(self.accounts.count, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
+
+    /// 계좌 하나의 거래 내역 화면 모델. 같은 저장소를 쓴다.
+    public func makeHistoryModel(for account: Account) -> HistoryModel {
+        HistoryModel(account: account, repository: repository)
+    }
 }

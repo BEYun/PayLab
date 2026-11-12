@@ -23,6 +23,11 @@ struct RemoteBankingRepositoryTests {
         #expect(recipients.map(\.id) == ["rcp-1", "rcp-2", "rcp-3"])
     }
 
+    @Test func fetchTransactionsDecodes() async throws {
+        let transactions = try await makeRepository().fetchTransactions(accountID: "acc-main")
+        #expect(transactions.count == FakeServer.transactionsPerAccount)
+    }
+
     @Test func transferReturnsReceipt() async throws {
         let receipt = try await makeRepository().transfer(
             TransferRequest(fromAccountID: "acc-main", recipientID: "rcp-1", amount: 1_000), idempotencyKey: UUID().uuidString)

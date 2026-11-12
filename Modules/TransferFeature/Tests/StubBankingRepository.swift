@@ -85,6 +85,11 @@ final class StubBankingRepository: BankingRepository {
         try recipients.get()
     }
 
+    func fetchTransactions(accountID: String) async throws -> [Transaction] {
+        Issue.record("TransferModel는 fetchTransactions를 부르지 않아야 한다")
+        throw BankingError.server(statusCode: 0)
+    }
+
     func transfer(_ request: TransferRequest, idempotencyKey: String) async throws -> TransferReceipt {
         let (reply, isFirst) = state.withLock { state in
             state.transferCalls.append(TransferCall(request: request, idempotencyKey: idempotencyKey))

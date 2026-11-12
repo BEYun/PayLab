@@ -21,6 +21,10 @@ public struct RemoteBankingRepository: BankingRepository {
         try await send("GET", "recipients")
     }
 
+    public func fetchTransactions(accountID: String) async throws -> [Transaction] {
+        try await send("GET", "accounts/\(accountID)/transactions")
+    }
+
     public func transfer(_ request: TransferRequest, idempotencyKey: String) async throws -> TransferReceipt {
         try await send("POST", "transfers", body: JSONEncoder().encode(request),
                        headers: [FakeServer.idempotencyKeyHeader: idempotencyKey])

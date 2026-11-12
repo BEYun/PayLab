@@ -1,0 +1,10 @@
+CompileSwiftSources normal arm64 com.apple.xcode.tools.swift.compiler (in target 'HomeFeature' from project 'PayLab')
+/Users/tester/PayLab/Modules/HomeFeature/Sources/HistoryModel.swift:12:17: warning: instance method 'rows()' took 150ms to type-check (limit: 100ms)
+/Users/tester/PayLab/Modules/HomeFeature/Sources/HistoryModel.swift:12:17: warning: instance method 'rows()' took 150ms to type-check (limit: 100ms)
+/Users/tester/PayLab/Modules/HomeFeature/Sources/HomeView.swift:8:9: warning: unused variable 'x'
+
+Build Timing Summary
+
+CompileC (0 tasks) | 0.000 seconds
+SwiftCompile (31 tasks) | 23.010 seconds
+Ld (7 tasks) | 1.500 seconds
