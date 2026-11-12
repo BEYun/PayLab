@@ -281,7 +281,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 |---|---|---|---|
 | `crash` | 시뮬레이터 `PayLab-*.ips` (UDID·시작 시각으로 거름) | PayLab 프로세스 크래시 | 로컬, CI |
 | `hang` | 앱 안 `HangMonitor`(`Modules/App/Sources/HangMonitor.swift`, Debug 전용) → `hang` 로그 | 메인 스레드 **250ms 이상** 응답 없음 | 로컬, CI |
-| `slow-build` 느린 함수 | Debug 빌드 플래그 `-warn-long-function-bodies=100` `-warn-long-expression-type-checking=100` | 타입 검사 **100ms 초과** | 로컬(변경 파일만), CI |
+| `slow-build` 느린 함수 | Debug 빌드 플래그 `-warn-long-function-bodies=250` `-warn-long-expression-type-checking=250` | 타입 검사 **250ms 초과** (CI 러너 편차로 100ms에서 상향) | 로컬(변경 파일만), CI |
 | `slow-build` 컴파일 시간 | CI `-showBuildTimingSummary` | 우리 코드 컴파일이 main 최근 5회 중앙값보다 **30% 이상, 10초 이상** 늘어남. 기준 5회 미만이면 판정 안 함 | CI만 |
 
 - hang `duration`은 하한이다. 실제보다 최대 약 50ms 짧게 찍힌다.

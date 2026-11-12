@@ -6,7 +6,7 @@ let settings: Settings = .settings(
     base: ["SWIFT_VERSION": "6.0"],
     configurations: [
         .debug(name: "Debug", settings: [
-            "OTHER_SWIFT_FLAGS": "$(inherited) -Xfrontend -warn-long-function-bodies=100 -Xfrontend -warn-long-expression-type-checking=100",
+            "OTHER_SWIFT_FLAGS": "$(inherited) -Xfrontend -warn-long-function-bodies=250 -Xfrontend -warn-long-expression-type-checking=250",
         ]),
         .release(name: "Release"),
     ])

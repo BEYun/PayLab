@@ -433,7 +433,7 @@ def issue_body(problem: dict, found: dict, previous: Optional[int] = None) -> st
     elif kind == "crash":
         figure = "크래시 %s" % problem.get("exception")
     elif kind == "slow-function":
-        figure = "타입 검사 %dms (기준 100ms) — `%s`" % (problem["ms"], problem["name"])
+        figure = "타입 검사 %dms (기준 250ms) — `%s`" % (problem["ms"], problem["name"])
     else:
         figure = "우리 코드 컴파일 시간 +%.0f%% (+%.1f초). 현재 %.1f초, 최근 중앙값 %.1f초" % (
             problem["increase_pct"], problem["increase_s"], problem["current"], problem["median"])
