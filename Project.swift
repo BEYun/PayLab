@@ -2,7 +2,14 @@ import ProjectDescription
 
 let bundleID = "com.example.paylab"
 let deploymentTargets: DeploymentTargets = .iOS("18.0")
-let settings: Settings = .settings(base: ["SWIFT_VERSION": "6.0"])
+let settings: Settings = .settings(
+    base: ["SWIFT_VERSION": "6.0"],
+    configurations: [
+        .debug(name: "Debug", settings: [
+            "OTHER_SWIFT_FLAGS": "$(inherited) -Xfrontend -warn-long-function-bodies=100 -Xfrontend -warn-long-expression-type-checking=100",
+        ]),
+        .release(name: "Release"),
+    ])
 
 /// 모듈 = 정적 프레임워크 + 테스트 타깃. 경로: Modules/<name>/Sources, Modules/<name>/Tests
 func module(_ name: String, dependencies: [String]) -> [Target] {
