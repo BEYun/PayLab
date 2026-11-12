@@ -21,6 +21,7 @@ import sys
 import tempfile
 from typing import Dict, Iterable, List, Optional, Set
 
+MIRROR_FRAME = "_os_log_impl_mirror_to_stderr"  # 디버거·테스트 콘솔에서만 쓰이는 stderr 미러링. 출시 앱에는 없다
 ENTRY_POINTS = {"main", "$main", "static PayLabApp.$main()", "__debug_main_executable_dylib_entry_point"}
 CRASH_GLOB = "~/Library/Logs/DiagnosticReports/PayLab-*.ips"
 SUBSYSTEM_PREDICATE = 'subsystem == "com.example.paylab"'
@@ -252,6 +253,11 @@ def collect(since: str, device: str, products_dir: str, build_logs: List[str], r
             files = frame_files(frames)
             if not files:
                 ignored += 1
+                continue
+            first_app = next(i for i, f in enumerate(frames) if is_our_frame(f))
+            if any(MIRROR_FRAME in (f.get("function"), f.get("symbol")) for f in frames[:first_app]):
+                ignored += 1
+                warnings.append("stderr 로그 미러링 중 hang %dms 무시 (%s)" % (hang["duration_ms"], frames[first_app]["function"]))
                 continue
             problems.append({"kind": "hang", "duration_ms": hang["duration_ms"], "time": hang["time"],
                              "frames": frames, "files": files, "context": hang["context"]})

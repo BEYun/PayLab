@@ -268,6 +268,33 @@ class CollectTests(unittest.TestCase):
         self.set_tz("UTC")  # since는 UTC 10:00 = 19:00 +0900. 크래시(10:05 +0900)는 그 전이다
         self.assertEqual(self.collect(since="2026-11-12 10:00:00")["problems"], [])
 
+    def mirror_hang(self, mirror):
+        names = ["writev", "_os_trace_writev"] + (["_os_log_impl_mirror_to_stderr"] if mirror else []) + \
+                ["_os_log_impl", "HomeModel.load()"]
+        lines = [hang_event("hang id=1 duration=466ms frames=%d" % len(names))]
+        for i, name in enumerate(names):
+            image = "HomeFeature" if name.startswith("HomeModel") else "libsystem_kernel.dylib"
+            lines.append(hang_event("hang frame id=1 #%d %s 0x%x base=0x800 %s" % (i, image, 0x1000 + i, name)))
+        self.add_binary("HomeFeature.framework/HomeFeature")
+
+        def tool(cmd):
+            if "atos" in cmd:
+                return ok("HomeModel.load() (in HomeFeature) (%s/Modules/HomeFeature/Sources/HomeModel.swift:25)\n" % REPO)
+            return ok()
+        return self.collect(hang_lines="\n".join(lines), since="2026-11-12 11:00:00", tool=tool)
+
+    def test_hang_during_stderr_log_mirroring_is_ignored_with_warning(self):
+        report = self.mirror_hang(mirror=True)
+        self.assertEqual(report["problems"], [])
+        self.assertEqual(report["ignored_hangs"], 1)
+        self.assertEqual(report["warnings"], ["stderr 로그 미러링 중 hang 466ms 무시 (HomeModel.load())"])
+
+    def test_same_hang_without_mirror_frame_is_a_problem(self):
+        report = self.mirror_hang(mirror=False)
+        self.assertEqual(report["ignored_hangs"], 0)
+        self.assertEqual(report["warnings"], [])
+        self.assertEqual(report["problems"][0]["files"], ["Modules/HomeFeature/Sources/HomeModel.swift"])
+
     def test_hang_with_repo_frame_is_a_problem_with_files_and_context(self):
         self.add_binary("HomeFeature.framework/HomeFeature")
         lines = "\n".join([hang_event("load start", pid=7, category="history"),

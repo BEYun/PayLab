@@ -223,7 +223,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 - 위 "현재 6개"는 기반 단계 기준이다.
 
 ### 테스트 개수 (2026-11-12)
-- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 81개(`scripts/test_perf_report.py`, `unittest`, 2026-11-12 최종 리뷰 반영 후 실행 결과 `Ran 81 tests`).
+- Swift Testing 72개(`test-all.sh` 출력의 `Test run with N tests` 합) + UI 테스트 4개(거래 내역 추가) + hook 테스트 14개 + perf-report 테스트 83개(`scripts/test_perf_report.py`, `unittest`, 2026-11-12 첫 CI 반영 후 실행 결과 `Ran 83 tests`).
 
 ## 트랜잭션 (송금 정합성)
 
@@ -286,6 +286,7 @@ xcrun xccov view --report --only-targets .build/TestResults/PayLab.xcresult   # 
 
 - hang `duration`은 하한이다. 실제보다 최대 약 50ms 짧게 찍힌다.
 - UI 테스트는 앱을 띄울 때마다 약 1.3초 시스템 hang을 만든다. 원인은 UIKit 접근성 초기화로 **추정**한다(잡힌 우리 코드 프레임은 진입점뿐이라 확인하지 못함). 스택에 우리 코드가 진입점뿐인 hang은 무시하고 `report.json`의 `ignored_hangs`에만 센다(`test-all.sh` 한 번에 보통 4).
+- 첫 우리 코드 프레임보다 안쪽에 `_os_log_impl_mirror_to_stderr`가 있는 hang은 stderr 로그 미러링 지연(테스트 하네스 파이프)이라 무시한다. `ignored_hangs`에 세고 `warnings`에 남긴다. 출시 앱에는 없는 측정 산물이다.
 - 디버거로 멈춘 시간(중단점)도 감시자에게는 hang으로 보인다. 디버깅한 시간대에는 `collect`를 돌리지 않는다.
 - "우리 코드" = 기호화한 파일이 저장소 안인 프레임. 컴파일러가 만든 진입점(`main`, `PayLabApp.$main()`)은 뺀다.
 
@@ -334,7 +335,7 @@ python3 -I scripts/perf-report.py report --input .build/perf/report.json --where
   2. 최근 main 실행 최대 5개의 `build-metrics` artifact를 기준으로 내려받는다.
   3. PR → `report --where pr`(이번 변경은 PR 코멘트 하나를 고쳐 씀, 기존은 이슈). main → `report --where main`(전부 이슈).
   4. 측정값 표를 잡 요약(Job Summary)에 쓴다. main이면 `build-metrics`를 artifact로 올린다.
-- 현재 PR 보고는 `ci.yml`의 `PERF_PR_DRY_RUN`으로 `--dry-run`이다. 이 줄을 지워야 PR 코멘트·이슈가 실제로 생긴다.
+- PR 보고는 실제로 쓴다(dry-run 해제, 2026-11-12). PR 코멘트·이슈가 실제로 생긴다.
 - report.json이 없으면(빌드가 수집 전에 실패) `::warning::`만 낸다.
 - 측정값 보기: `gh run view <run-id>`의 요약, `gh run download <run-id> -n perf-report`.
 
